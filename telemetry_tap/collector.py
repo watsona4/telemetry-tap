@@ -1,0 +1,576 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import platform
+import logging
+import socket
+import subprocess
+from typing import Any
+from urllib.request import urlopen
+
+import psutil
+
+from telemetry_tap.config import CollectorConfig
+
+SCHEMA_NAME = "hwmon-exporter"
+SCHEMA_VERSION = 1
+
+
+@dataclass
+class IoSnapshot:
+    timestamp: float
+    values: dict[str, psutil._common.sdiskio]
+
+
+@dataclass
+class NetSnapshot:
+    timestamp: float
+    values: dict[str, psutil._common.snetio]
+
+
+@dataclass
+class MetricsState:
+    last_disk: IoSnapshot | None = None
+    last_net: NetSnapshot | None = None
+    drive_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+class MetricsCollector:
+    def __init__(self, config: CollectorConfig) -> None:
+        self.config = config
+        self.state = MetricsState()
+        self.logger = logging.getLogger(self.__class__.__name__)
+
+    def collect(self) -> dict[str, Any]:
+        self.logger.debug("Collecting metrics payload.")
+        ts = datetime.now(timezone.utc).isoformat()
+        payload: dict[str, Any] = {
+            "schema": {"name": SCHEMA_NAME, "version": SCHEMA_VERSION},
+            "ts": ts,
+            "host": self._collect_host(ts),
+            "health": self._collect_health(),
+            "cpus": self._collect_cpus(),
+            "memory": self._collect_memory(),
+        }
+
+        if filesystems := self._collect_filesystems():
+            payload["filesystems"] = filesystems
+
+        if drives := self._collect_drives():
+            payload["drives"] = drives
+
+        if ifaces := self._collect_ifaces():
+            payload["ifaces"] = ifaces
+
+        if batteries := self._collect_batteries():
+            payload["batteries"] = batteries
+
+        motherboard = self._collect_lhm_board()
+        if motherboard:
+            payload["motherboard"] = motherboard
+
+        gpus = self._collect_lhm_gpus()
+        if gpus:
+            payload["gpus"] = gpus
+
+        self.logger.debug("Completed metrics payload collection.")
+        return payload
+
+    def _collect_host(self, ts: str) -> dict[str, Any]:
+        boot = datetime.fromtimestamp(psutil.boot_time(), tz=timezone.utc)
+        uptime_s = int(datetime.now(timezone.utc).timestamp() - boot.timestamp())
+        return {
+            "name": socket.gethostname(),
+            "system": platform.system(),
+            "os": platform.platform(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "python": platform.python_version(),
+            "boot_time": boot.isoformat(),
+            "uptime_s": uptime_s,
+        }
+
+    def _collect_health(self) -> dict[str, Any]:
+        issues: list[str] = []
+        drive_health = self._drive_health_issues()
+        issues.extend(drive_health)
+        if issues:
+            self.logger.warning("Health issues detected: %s", issues)
+        return {"overall_ok": not issues, "issues": issues}
+
+    def _collect_cpus(self) -> list[dict[str, Any]]:
+        per_cpu = psutil.cpu_percent(interval=None, percpu=True)
+        num_cores = len(per_cpu)
+        cores: list[dict[str, Any]] = []
+        for idx, load in enumerate(per_cpu):
+            cores.append(
+                {
+                    "name": f"Core {idx}",
+                    "threads": [
+                        {"name": f"Thread {idx}", "load_pct": float(load)}
+                    ],
+                }
+            )
+
+        cpu_entry: dict[str, Any] = {
+            "name": "CPU",
+            "num_cores": num_cores,
+            "load_pct": float(psutil.cpu_percent(interval=None)),
+            "cores": cores,
+        }
+
+        if hasattr(os, "getloadavg"):
+            load_1m, load_5m, load_15m = os.getloadavg()
+            cpu_entry.update(
+                {
+                    "load_1m": float(load_1m),
+                    "load_5m": float(load_5m),
+                    "load_15m": float(load_15m),
+                }
+            )
+
+        temps = psutil.sensors_temperatures(fahrenheit=False)
+        if temps:
+            for entries in temps.values():
+                if entries:
+                    cpu_entry["temp_c"] = float(entries[0].current)
+                    break
+        else:
+            self.logger.debug("No CPU temperature sensors found.")
+
+        return [cpu_entry]
+
+    def _collect_memory(self) -> dict[str, Any]:
+        vm = psutil.virtual_memory()
+        memory: dict[str, Any] = {
+            "system": {
+                "used_b": int(vm.used),
+                "available_b": int(vm.available),
+                "load_pct": float(vm.percent),
+            }
+        }
+        swap = psutil.swap_memory()
+        if swap:
+            memory["virtual"] = {
+                "used_b": int(swap.used),
+                "available_b": int(swap.free),
+                "load_pct": float(swap.percent),
+            }
+        return memory
+
+    def _collect_filesystems(self) -> list[dict[str, Any]]:
+        filesystems: list[dict[str, Any]] = []
+        for part in psutil.disk_partitions(all=False):
+            try:
+                usage = psutil.disk_usage(part.mountpoint)
+            except OSError:
+                self.logger.debug("Skipping filesystem at %s (unreadable).", part.mountpoint)
+                continue
+            filesystems.append(
+                {
+                    "name": part.device,
+                    "mountpoint": part.mountpoint,
+                    "format": part.fstype,
+                    "used_b": int(usage.used),
+                    "available_b": int(usage.free),
+                }
+            )
+        return filesystems
+
+    def _collect_drives(self) -> list[dict[str, Any]]:
+        metadata = self._drive_metadata()
+        if not metadata:
+            self.logger.debug("No drive metadata available.")
+            return []
+
+        io_stats = psutil.disk_io_counters(perdisk=True)
+        now = datetime.now(timezone.utc).timestamp()
+        drives: list[dict[str, Any]] = []
+        for name, meta in metadata.items():
+            if name not in io_stats:
+                self.logger.debug("Drive %s missing IO stats.", name)
+                continue
+            io_entry = io_stats[name]
+            entry: dict[str, Any] = {
+                "name": name,
+                "type": meta.get("type", "unknown"),
+                "manufacturer": meta.get("manufacturer", "unknown"),
+                "model": meta.get("model", "unknown"),
+                "used_b": meta.get("used_b", 0),
+                "available_b": meta.get("available_b", 0),
+                "listed_cap_b": meta.get("listed_cap_b"),
+                "serial_number": meta.get("serial"),
+                "firmware_version": meta.get("firmware"),
+                "total_read_b": int(io_entry.read_bytes),
+                "total_write_b": int(io_entry.write_bytes),
+            }
+
+            if self.state.last_disk and name in self.state.last_disk.values:
+                elapsed = now - self.state.last_disk.timestamp
+                if elapsed > 0:
+                    prev = self.state.last_disk.values[name]
+                    entry["read_rate_bps"] = int(
+                        (io_entry.read_bytes - prev.read_bytes) / elapsed
+                    )
+                    entry["write_rate_bps"] = int(
+                        (io_entry.write_bytes - prev.write_bytes) / elapsed
+                    )
+
+            smart = meta.get("smart")
+            if smart:
+                entry["smart"] = smart
+
+            drives.append(entry)
+
+        self.state.last_disk = IoSnapshot(timestamp=now, values=io_stats)
+        return drives
+
+    def _collect_ifaces(self) -> list[dict[str, Any]]:
+        addrs = psutil.net_if_addrs()
+        io_stats = psutil.net_io_counters(pernic=True)
+        now = datetime.now(timezone.utc).timestamp()
+        ifaces: list[dict[str, Any]] = []
+
+        for iface, addr_list in addrs.items():
+            mac = None
+            ipv4 = None
+            ipv6 = None
+            for addr in addr_list:
+                if addr.family == socket.AF_INET:
+                    ipv4 = addr.address
+                elif addr.family == socket.AF_INET6:
+                    ipv6 = addr.address.split("%", 1)[0]
+                elif getattr(socket, "AF_LINK", None) == addr.family:
+                    mac = addr.address
+                elif getattr(psutil, "AF_LINK", None) == addr.family:
+                    mac = addr.address
+            if mac is None:
+                self.logger.debug("Skipping interface %s without MAC.", iface)
+                continue
+
+            entry: dict[str, Any] = {
+                "name": iface,
+                "mac": mac,
+                "ipv4": ipv4,
+                "ipv6": ipv6,
+            }
+
+            if iface in io_stats:
+                counters = io_stats[iface]
+                entry["data_up_b"] = int(counters.bytes_sent)
+                entry["data_down_b"] = int(counters.bytes_recv)
+
+                if self.state.last_net and iface in self.state.last_net.values:
+                    elapsed = now - self.state.last_net.timestamp
+                    if elapsed > 0:
+                        prev = self.state.last_net.values[iface]
+                        entry["rate_up_bps"] = int(
+                            (counters.bytes_sent - prev.bytes_sent) / elapsed
+                        )
+                        entry["rate_down_bps"] = int(
+                            (counters.bytes_recv - prev.bytes_recv) / elapsed
+                        )
+
+            ifaces.append(entry)
+
+        self.state.last_net = NetSnapshot(timestamp=now, values=io_stats)
+        return ifaces
+
+    def _collect_batteries(self) -> list[dict[str, Any]]:
+        battery = psutil.sensors_battery()
+        if battery is None:
+            self.logger.debug("No battery data available.")
+            return []
+        return [
+            {
+                "name": "Battery",
+                "discharging": battery.power_plugged is False,
+                "charge_level_pct": float(battery.percent),
+            }
+        ]
+
+    def _drive_health_issues(self) -> list[str]:
+        issues: list[str] = []
+        metadata = self.state.drive_cache
+        for name, meta in metadata.items():
+            smart = meta.get("smart")
+            if not smart:
+                continue
+            health = smart.get("overall_health")
+            if health and health.upper() not in {"PASSED", "OK"}:
+                issues.append(f"Drive {name} SMART health: {health}")
+        return issues
+
+    def _drive_metadata(self) -> dict[str, dict[str, Any]]:
+        if self.state.drive_cache:
+            return self.state.drive_cache
+
+        metadata: dict[str, dict[str, Any]] = {}
+        metadata.update(self._drive_metadata_lsblk())
+        self._populate_usage(metadata)
+        self._populate_smart(metadata)
+        self.state.drive_cache = metadata
+        return metadata
+
+    def _drive_metadata_lsblk(self) -> dict[str, dict[str, Any]]:
+        if platform.system().lower() != "linux":
+            self.logger.debug("Skipping lsblk drive metadata on non-Linux.")
+            return {}
+        try:
+            output = subprocess.check_output(
+                [self.config.lsblk_path, "-J", "-O"], text=True
+            )
+        except (subprocess.SubprocessError, FileNotFoundError):
+            self.logger.debug("lsblk command failed or missing.")
+            return {}
+        try:
+            data = json.loads(output)
+        except json.JSONDecodeError:
+            self.logger.debug("Failed to parse lsblk output JSON.")
+            return {}
+
+        metadata: dict[str, dict[str, Any]] = {}
+        for block in data.get("blockdevices", []):
+            if block.get("type") != "disk":
+                continue
+            name = block.get("name")
+            if not name:
+                continue
+            drive_type = "HDD" if block.get("rota") else "SSD"
+            metadata[name] = {
+                "manufacturer": block.get("vendor") or "unknown",
+                "model": block.get("model") or "unknown",
+                "type": drive_type,
+                "listed_cap_b": block.get("size")
+                if isinstance(block.get("size"), int)
+                else None,
+            }
+        return metadata
+
+    def _populate_usage(self, metadata: dict[str, dict[str, Any]]) -> None:
+        if not metadata:
+            return
+        partitions = psutil.disk_partitions(all=False)
+        for part in partitions:
+            device = Path(part.device).name
+            if device not in metadata:
+                continue
+            try:
+                usage = psutil.disk_usage(part.mountpoint)
+            except OSError:
+                self.logger.debug("Skipping usage for %s (unreadable).", part.mountpoint)
+                continue
+            metadata[device]["used_b"] = int(usage.used)
+            metadata[device]["available_b"] = int(usage.free)
+
+    def _populate_smart(self, metadata: dict[str, dict[str, Any]]) -> None:
+        if not metadata:
+            return
+        for name in metadata:
+            device_path = f"/dev/{name}"
+            smart = self._smartctl_info(device_path)
+            if smart:
+                metadata[name]["smart"] = smart
+            else:
+                self.logger.debug("SMART data unavailable for %s.", device_path)
+
+    def _smartctl_info(self, device_path: str) -> dict[str, Any] | None:
+        try:
+            output = subprocess.check_output(
+                [self.config.smartctl_path, "-a", "-j", device_path],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except (subprocess.SubprocessError, FileNotFoundError):
+            self.logger.debug("smartctl failed for %s.", device_path)
+            return None
+        try:
+            data = json.loads(output)
+        except json.JSONDecodeError:
+            self.logger.debug("Failed to parse smartctl JSON for %s.", device_path)
+            return None
+        smart: dict[str, Any] = {}
+        if "smart_status" in data:
+            smart["overall_health"] = (
+                "PASSED" if data["smart_status"].get("passed") else "FAILED"
+            )
+        nvme = data.get("nvme_smart_health_information_log")
+        if nvme:
+            mapping = {
+                "power_on_hours": nvme.get("power_on_hours"),
+                "critical_warning": nvme.get("critical_warning"),
+                "available_spare_pct": nvme.get("available_spare"),
+                "available_spare_threshold_pct": nvme.get(
+                    "available_spare_threshold"
+                ),
+                "percentage_used_pct": nvme.get("percentage_used"),
+                "data_units_read": nvme.get("data_units_read"),
+                "data_units_written": nvme.get("data_units_written"),
+                "host_read_commands": nvme.get("host_reads"),
+                "host_write_commands": nvme.get("host_writes"),
+                "controller_busy_time": nvme.get("controller_busy_time"),
+                "power_cycles": nvme.get("power_cycles"),
+                "unsafe_shutdowns": nvme.get("unsafe_shutdowns"),
+                "media_errors": nvme.get("media_errors"),
+                "num_err_log_entries": nvme.get("num_err_log_entries"),
+            }
+            for key, value in mapping.items():
+                if value is not None:
+                    smart[key] = value
+        if smart:
+            return smart
+        return None
+
+    def _collect_lhm_board(self) -> dict[str, Any] | None:
+        data = self._read_lhm()
+        if not data:
+            return None
+        motherboard: dict[str, Any] = {}
+        temps: list[dict[str, Any]] = []
+        fans: list[dict[str, Any]] = []
+        voltages: list[dict[str, Any]] = []
+        powers: list[dict[str, Any]] = []
+
+        for sensor in data.get("sensors", []):
+            category = sensor.get("category")
+            name = sensor.get("name")
+            value = sensor.get("value")
+            if name is None or value is None:
+                continue
+            if category == "temperature":
+                temps.append({"name": name, "temp_c": value, "source": "lhm"})
+            elif category == "fan":
+                fans.append({"name": name, "rpm": value, "source": "lhm"})
+            elif category == "voltage":
+                voltages.append(
+                    {"name": name, "voltage_v": value, "source": "lhm"}
+                )
+            elif category == "power":
+                powers.append({"name": name, "power_w": value, "source": "lhm"})
+
+        if temps:
+            motherboard["temps"] = temps
+        if fans:
+            motherboard["fans"] = fans
+        if voltages:
+            motherboard["voltages"] = voltages
+        if powers:
+            motherboard["powers"] = powers
+
+        return motherboard if motherboard else None
+
+    def _collect_lhm_gpus(self) -> list[dict[str, Any]]:
+        data = self._read_lhm()
+        if not data:
+            return []
+        gpus: list[dict[str, Any]] = []
+        for device in data.get("gpus", []):
+            name = device.get("name")
+            if not name:
+                continue
+            core_load = device.get("core_load")
+            engine_loads = device.get("engines", [])
+            core = {
+                "name": "Core",
+                "load_pct": core_load if core_load is not None else 0,
+            }
+            engines = [
+                {"name": engine["name"], "load_pct": engine["load"]}
+                for engine in engine_loads
+                if "name" in engine and "load" in engine
+            ]
+            if not engines:
+                engines = [{"name": "Core", "load_pct": core["load_pct"]}]
+            entry: dict[str, Any] = {"name": name, "core": core, "engines": engines}
+            if device.get("temp_c") is not None:
+                entry["temp_c"] = device["temp_c"]
+            gpus.append(entry)
+        return gpus
+
+    def _read_lhm(self) -> dict[str, Any] | None:
+        if not self.config.librehardwaremonitor_url:
+            self.logger.debug("LibreHardwareMonitor URL not configured.")
+            return None
+        try:
+            with urlopen(self.config.librehardwaremonitor_url, timeout=2) as response:
+                payload = response.read().decode("utf-8")
+        except OSError:
+            self.logger.debug("Failed to fetch LibreHardwareMonitor JSON.")
+            return None
+        try:
+            raw = json.loads(payload)
+        except json.JSONDecodeError:
+            self.logger.debug("Failed to parse LibreHardwareMonitor JSON.")
+            return None
+        return self._parse_lhm(raw)
+
+    def _parse_lhm(self, raw: dict[str, Any]) -> dict[str, Any]:
+        sensors: list[dict[str, Any]] = []
+        gpus: list[dict[str, Any]] = []
+
+        def walk(node: dict[str, Any], path: list[str]) -> None:
+            node_type = node.get("Type")
+            node_text = node.get("Text")
+            if node_type == "Sensor":
+                sensor_type = (node.get("SensorType") or "").lower()
+                if node.get("Value") is None:
+                    return
+                sensors.append(
+                    {
+                        "category": sensor_type,
+                        "name": node_text,
+                        "value": float(node["Value"]),
+                    }
+                )
+                return
+            if node_text and "gpu" in node_text.lower() and node_type == "Hardware":
+                gpu_entry: dict[str, Any] = {
+                    "name": node_text,
+                    "engines": [],
+                }
+                for child in node.get("Children", []):
+                    walk(child, path + [node_text])
+                gpus.append(gpu_entry)
+            for child in node.get("Children", []):
+                walk(child, path + [node_text or ""])
+
+        for root in raw.get("Children", []):
+            walk(root, [])
+
+        parsed = {"sensors": sensors, "gpus": []}
+        if gpus:
+            gpu_map: dict[str, dict[str, Any]] = {gpu["name"]: gpu for gpu in gpus}
+            for sensor in sensors:
+                if sensor["category"] == "load":
+                    name = sensor["name"]
+                    for gpu_name, gpu_entry in gpu_map.items():
+                        if gpu_name in name:
+                            gpu_entry.setdefault("engines", []).append(
+                                {"name": name, "load": sensor["value"]}
+                            )
+                if sensor["category"] == "temperature":
+                    name = sensor["name"]
+                    for gpu_name, gpu_entry in gpu_map.items():
+                        if gpu_name in name:
+                            gpu_entry["temp_c"] = sensor["value"]
+            parsed["gpus"] = [
+                {
+                    "name": gpu["name"],
+                    "engines": gpu.get("engines", []),
+                    "core_load": next(
+                        (
+                            engine["load"]
+                            for engine in gpu.get("engines", [])
+                            if "core" in engine["name"].lower()
+                        ),
+                        None,
+                    ),
+                    "temp_c": gpu.get("temp_c"),
+                }
+                for gpu in gpus
+            ]
+        return parsed

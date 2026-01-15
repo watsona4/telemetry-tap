@@ -209,6 +209,8 @@ class MetricsCollector:
             self.logger.debug("No drive metadata available.")
             return []
 
+        lhm_data = self._read_lhm()
+        lhm_drives = self._collect_lhm_drives(lhm_data)
         io_stats = psutil.disk_io_counters(perdisk=True)
         now = datetime.now(timezone.utc).timestamp()
         drives: list[dict[str, Any]] = []
@@ -245,6 +247,8 @@ class MetricsCollector:
             smart = meta.get("smart")
             if smart:
                 entry["smart"] = smart
+            if name in lhm_drives and lhm_drives[name].get("temp_c") is not None:
+                entry["temp_c"] = lhm_drives[name]["temp_c"]
 
             drives.append(entry)
 
@@ -303,20 +307,30 @@ class MetricsCollector:
         return ifaces
 
     def _collect_batteries(self) -> list[dict[str, Any]]:
-        if not hasattr(psutil, "sensors_battery"):
+        batteries: list[dict[str, Any]] = []
+        if hasattr(psutil, "sensors_battery"):
+            battery = psutil.sensors_battery()
+            if battery is not None:
+                batteries.append(
+                    {
+                        "name": "Battery",
+                        "discharging": battery.power_plugged is False,
+                        "charge_level_pct": float(battery.percent),
+                    }
+                )
+            else:
+                self.logger.debug("No battery data available from psutil.")
+        else:
             self.logger.debug("Battery sensors not supported on this platform.")
-            return []
-        battery = psutil.sensors_battery()
-        if battery is None:
-            self.logger.debug("No battery data available.")
-            return []
-        return [
-            {
-                "name": "Battery",
-                "discharging": battery.power_plugged is False,
-                "charge_level_pct": float(battery.percent),
-            }
-        ]
+
+        lhm_data = self._read_lhm()
+        lhm_batteries = self._collect_lhm_batteries(lhm_data)
+        existing_names = {battery["name"] for battery in batteries}
+        for battery in lhm_batteries:
+            if battery["name"] not in existing_names:
+                batteries.append(battery)
+
+        return batteries
 
     def _drive_health_issues(self) -> list[str]:
         issues: list[str] = []
@@ -723,31 +737,53 @@ class MetricsCollector:
     def _parse_lhm(self, raw: dict[str, Any]) -> dict[str, Any]:
         motherboard_sensors: list[dict[str, Any]] = []
         gpu_sensors: dict[str, list[dict[str, Any]]] = {}
+        battery_sensors: dict[str, list[dict[str, Any]]] = {}
+        drive_sensors: dict[str, list[dict[str, Any]]] = {}
         gpus: list[dict[str, Any]] = []
 
         def walk(
             node: dict[str, Any],
             hardware_type: str | None,
             gpu_name: str | None,
+            storage_name: str | None,
+            battery_name: str | None,
         ) -> None:
             node_type = node.get("Type")
             node_text = node.get("Text") or ""
             next_hardware = hardware_type
             next_gpu_name = gpu_name
+            next_storage_name = storage_name
+            next_battery_name = battery_name
             if node_type == "Hardware":
                 raw_hardware = (node.get("HardwareType") or "").lower()
                 if raw_hardware.startswith("gpu"):
                     next_hardware = "gpu"
                 elif raw_hardware in {"motherboard", "mainboard"}:
                     next_hardware = "motherboard"
+                elif raw_hardware in {"hdd", "ssd", "storage", "nvme"}:
+                    next_hardware = "storage"
+                elif raw_hardware in {"battery"}:
+                    next_hardware = "battery"
                 else:
                     next_hardware = raw_hardware or hardware_type
                 if next_hardware == "gpu":
                     gpus.append({"name": node_text})
                     gpu_sensors.setdefault(node_text, [])
                     next_gpu_name = node_text
+                if next_hardware == "storage":
+                    drive_sensors.setdefault(node_text, [])
+                    next_storage_name = node_text
+                if next_hardware == "battery":
+                    battery_sensors.setdefault(node_text, [])
+                    next_battery_name = node_text
                 for child in node.get("Children", []):
-                    walk(child, next_hardware, next_gpu_name)
+                    walk(
+                        child,
+                        next_hardware,
+                        next_gpu_name,
+                        next_storage_name,
+                        next_battery_name,
+                    )
                 return
             if node_type == "Sensor":
                 sensor_type = (node.get("SensorType") or "").lower()
@@ -764,12 +800,24 @@ class MetricsCollector:
                 if hardware_type == "gpu":
                     if gpu_name:
                         gpu_sensors.setdefault(gpu_name, []).append(sensor_entry)
+                if hardware_type == "storage":
+                    if storage_name:
+                        drive_sensors.setdefault(storage_name, []).append(sensor_entry)
+                if hardware_type == "battery":
+                    if battery_name:
+                        battery_sensors.setdefault(battery_name, []).append(sensor_entry)
                 return
             for child in node.get("Children", []):
-                walk(child, next_hardware, next_gpu_name)
+                walk(
+                    child,
+                    next_hardware,
+                    next_gpu_name,
+                    next_storage_name,
+                    next_battery_name,
+                )
 
         for root in raw.get("Children", []):
-            walk(root, None, None)
+            walk(root, None, None, None, None)
 
         parsed_gpus: list[dict[str, Any]] = []
         for gpu in gpus:
@@ -804,4 +852,91 @@ class MetricsCollector:
                 }
             )
 
-        return {"motherboard_sensors": motherboard_sensors, "gpus": parsed_gpus}
+        parsed_batteries: list[dict[str, Any]] = []
+        for name, sensors in battery_sensors.items():
+            charge = next(
+                (
+                    sensor["value"]
+                    for sensor in sensors
+                    if sensor["category"] in {"charge", "level"}
+                ),
+                None,
+            )
+            voltage = next(
+                (
+                    sensor["value"]
+                    for sensor in sensors
+                    if sensor["category"] == "voltage"
+                ),
+                None,
+            )
+            current = next(
+                (
+                    sensor["value"]
+                    for sensor in sensors
+                    if sensor["category"] == "current"
+                ),
+                None,
+            )
+            power = next(
+                (
+                    sensor["value"]
+                    for sensor in sensors
+                    if sensor["category"] == "power"
+                ),
+                None,
+            )
+            if charge is None:
+                continue
+            discharging = False
+            if power is not None:
+                discharging = power < 0
+            elif current is not None:
+                discharging = current < 0
+            entry: dict[str, Any] = {
+                "name": name,
+                "discharging": discharging,
+                "charge_level_pct": float(charge),
+            }
+            if voltage is not None:
+                entry["voltage_v"] = float(voltage)
+            if current is not None:
+                entry["current_a"] = float(current)
+            if power is not None:
+                entry["power_w"] = float(power)
+            parsed_batteries.append(entry)
+
+        parsed_drives: dict[str, dict[str, Any]] = {}
+        for name, sensors in drive_sensors.items():
+            temp = next(
+                (
+                    sensor["value"]
+                    for sensor in sensors
+                    if sensor["category"] == "temperature"
+                ),
+                None,
+            )
+            if temp is not None:
+                parsed_drives[name] = {"temp_c": float(temp)}
+
+        return {
+            "motherboard_sensors": motherboard_sensors,
+            "gpus": parsed_gpus,
+            "batteries": parsed_batteries,
+            "drives": parsed_drives,
+        }
+
+    def _collect_lhm_batteries(
+        self, data: dict[str, Any] | None
+    ) -> list[dict[str, Any]]:
+        if not data:
+            return []
+        batteries = data.get("batteries", [])
+        return [battery for battery in batteries if "charge_level_pct" in battery]
+
+    def _collect_lhm_drives(
+        self, data: dict[str, Any] | None
+    ) -> dict[str, dict[str, Any]]:
+        if not data:
+            return {}
+        return data.get("drives", {})

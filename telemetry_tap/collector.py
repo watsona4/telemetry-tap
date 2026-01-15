@@ -205,12 +205,25 @@ class MetricsCollector:
 
     def _collect_drives(self) -> list[dict[str, Any]]:
         metadata = self._drive_metadata()
-        if not metadata:
-            self.logger.debug("No drive metadata available.")
-            return []
-
         lhm_data = self._read_lhm()
         lhm_drives = self._collect_lhm_drives(lhm_data)
+        if not metadata:
+            if lhm_drives:
+                self.logger.debug("Using LibreHardwareMonitor drive data fallback.")
+                return [
+                    {
+                        "name": name,
+                        "type": "unknown",
+                        "manufacturer": "unknown",
+                        "model": name,
+                        "used_b": 0,
+                        "available_b": 0,
+                        **values,
+                    }
+                    for name, values in lhm_drives.items()
+                ]
+            self.logger.debug("No drive metadata available.")
+            return []
         io_stats = psutil.disk_io_counters(perdisk=True)
         now = datetime.now(timezone.utc).timestamp()
         drives: list[dict[str, Any]] = []
@@ -247,8 +260,18 @@ class MetricsCollector:
             smart = meta.get("smart")
             if smart:
                 entry["smart"] = smart
-            if name in lhm_drives and lhm_drives[name].get("temp_c") is not None:
-                entry["temp_c"] = lhm_drives[name]["temp_c"]
+            if name in lhm_drives:
+                for key in [
+                    "temp_c",
+                    "read_activity_pct",
+                    "write_activity_pct",
+                    "read_rate_bps",
+                    "write_rate_bps",
+                    "total_read_b",
+                    "total_write_b",
+                ]:
+                    if key in lhm_drives[name] and lhm_drives[name][key] is not None:
+                        entry[key] = lhm_drives[name][key]
 
             drives.append(entry)
 
@@ -735,6 +758,9 @@ class MetricsCollector:
         return result.stdout
 
     def _parse_lhm(self, raw: dict[str, Any]) -> dict[str, Any]:
+        if self._lhm_has_sensor_id(raw):
+            return self._parse_lhm_tree(raw)
+
         motherboard_sensors: list[dict[str, Any]] = []
         gpu_sensors: dict[str, list[dict[str, Any]]] = {}
         battery_sensors: dict[str, list[dict[str, Any]]] = {}
@@ -940,3 +966,150 @@ class MetricsCollector:
         if not data:
             return {}
         return data.get("drives", {})
+
+    def _lhm_has_sensor_id(self, raw: dict[str, Any]) -> bool:
+        nodes = [raw]
+        while nodes:
+            node = nodes.pop()
+            if isinstance(node, dict):
+                if node.get("SensorId"):
+                    return True
+                nodes.extend(node.get("Children", []))
+        return False
+
+    def _parse_lhm_tree(self, raw: dict[str, Any]) -> dict[str, Any]:
+        battery_map: dict[str, dict[str, Any]] = {}
+        drive_map: dict[str, dict[str, Any]] = {}
+
+        def parse_numeric(value: str | None) -> float | None:
+            if value is None:
+                return None
+            text = value.replace(",", "").strip()
+            text = text.replace("/s", "").strip()
+            for token in ["°C", "V", "A", "W", "%", "mWh", "GB", "MB", "KB"]:
+                if token in text:
+                    number = text.replace(token, "").strip()
+                    try:
+                        parsed = float(number)
+                    except ValueError:
+                        return None
+                    if token == "GB":
+                        return parsed * 1024 * 1024 * 1024
+                    if token == "MB":
+                        return parsed * 1024 * 1024
+                    if token == "KB":
+                        return parsed * 1024
+                    return parsed
+            try:
+                return float(text)
+            except ValueError:
+                return None
+
+        def classify_hardware(image_url: str) -> str | None:
+            lowered = image_url.lower()
+            if "battery" in lowered:
+                return "battery"
+            if "hdd" in lowered or "ssd" in lowered or "nvme" in lowered:
+                return "storage"
+            if "gpu" in lowered or "ati" in lowered or "nvidia" in lowered:
+                return "gpu"
+            if "mainboard" in lowered or "motherboard" in lowered:
+                return "motherboard"
+            return None
+
+        def walk(node: dict[str, Any], hw_type: str | None, hw_name: str | None) -> None:
+            image_url = node.get("ImageURL") or ""
+            node_text = (node.get("Text") or "").replace("\x00", "").strip()
+            detected = classify_hardware(image_url)
+            next_type = detected or hw_type
+            next_name = hw_name
+            if detected in {"battery", "storage"}:
+                next_name = node_text or hw_name
+
+            sensor_id = node.get("SensorId")
+            sensor_type = (node.get("Type") or "").lower()
+            if sensor_id or sensor_type:
+                value = parse_numeric(node.get("Value"))
+                if value is not None and next_type == "battery" and next_name:
+                    battery = battery_map.setdefault(next_name, {})
+                    if sensor_type == "voltage":
+                        battery["voltage_v"] = float(value)
+                    elif sensor_type == "current":
+                        battery["current_a"] = float(value)
+                    elif sensor_type == "power":
+                        battery["power_w"] = float(value)
+                    elif sensor_type == "level":
+                        if "degradation" in node_text.lower():
+                            battery["degradation_pct"] = float(value)
+                        elif "charge" in node_text.lower():
+                            battery["charge_level_pct"] = float(value)
+                    elif sensor_type == "energy":
+                        if "design" in node_text.lower():
+                            battery["design_cap_mwh"] = float(value)
+                        elif "fully" in node_text.lower():
+                            battery["full_cap_mwh"] = float(value)
+                        elif "remaining" in node_text.lower():
+                            battery["remain_cap_mwh"] = float(value)
+                if value is not None and next_type == "storage" and next_name:
+                    drive = drive_map.setdefault(next_name, {})
+                    label = node_text.lower()
+                    if sensor_type == "temperature":
+                        drive["temp_c"] = float(value)
+                    elif sensor_type == "load":
+                        if "read activity" in label:
+                            drive["read_activity_pct"] = float(value)
+                        elif "write activity" in label:
+                            drive["write_activity_pct"] = float(value)
+                    elif sensor_type == "throughput":
+                        if "read rate" in label:
+                            drive["read_rate_bps"] = int(value)
+                        elif "write rate" in label:
+                            drive["write_rate_bps"] = int(value)
+                    elif sensor_type == "data":
+                        if "data read" in label:
+                            drive["total_read_b"] = int(value)
+                        elif "data written" in label:
+                            drive["total_write_b"] = int(value)
+
+            for child in node.get("Children", []):
+                if isinstance(child, dict):
+                    walk(child, next_type, next_name)
+
+        walk(raw, None, None)
+
+        batteries: list[dict[str, Any]] = []
+        for name, data in battery_map.items():
+            charge = data.get("charge_level_pct")
+            if charge is None:
+                continue
+            discharging = False
+            power = data.get("power_w")
+            current = data.get("current_a")
+            if power is not None:
+                discharging = power < 0
+            elif current is not None:
+                discharging = current < 0
+            entry = {
+                "name": name,
+                "discharging": discharging,
+                "charge_level_pct": float(charge),
+            }
+            for key in [
+                "voltage_v",
+                "current_a",
+                "power_w",
+                "design_cap_mwh",
+                "full_cap_mwh",
+                "remain_cap_mwh",
+                "degradation_pct",
+            ]:
+                if key in data:
+                    entry[key] = data[key]
+            batteries.append(entry)
+
+        return {
+            "motherboard_sensors": [],
+            "gpus": [],
+            "batteries": batteries,
+            "drives": drive_map,
+        }

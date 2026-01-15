@@ -41,6 +41,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Collect and publish a single payload, then exit",
     )
+    parser.add_argument(
+        "--dump-json",
+        help="Write the JSON payload to a file (overwrites on each loop)",
+    )
     return parser
 
 
@@ -64,7 +68,12 @@ def main() -> None:
     if schema_errors:
         logger.warning("Schema validation failed with %s errors.", len(schema_errors))
         logger.debug("Schema errors: %s", schema_errors)
+    else:
+        logger.info("Schema validation passed.")
     initial_json = json.dumps(initial_payload, indent=2) if pretty_print else json.dumps(initial_payload)
+    if args.dump_json:
+        with open(args.dump_json, "w", encoding="utf-8") as handle:
+            handle.write(initial_json)
     if args.dry_run:
         logger.info("Dry run enabled; skipping MQTT publish.")
         logger.debug("Initial payload: %s", initial_json)
@@ -89,7 +98,12 @@ def main() -> None:
                     "Schema validation failed with %s errors.", len(schema_errors)
                 )
                 logger.debug("Schema errors: %s", schema_errors)
+            else:
+                logger.debug("Schema validation passed.")
             payload_json = json.dumps(payload, indent=2) if pretty_print else json.dumps(payload)
+            if args.dump_json:
+                with open(args.dump_json, "w", encoding="utf-8") as handle:
+                    handle.write(payload_json)
             if args.dry_run:
                 logger.debug("Payload: %s", payload_json)
             else:

@@ -22,7 +22,7 @@ Telemetry Tap is a lightweight, universal hardware monitoring script that collec
    ```bash
    telemetry-tap --config config/local.cfg --log-level INFO
    ```
-   For diagnostics without publishing over MQTT, use `--dry-run` and `-v`. Use `-vv` to enable trace logging of CLI tool output; debug/trace modes pretty-print payloads and colorize logs. Add `--once` to publish a single payload and exit.
+   For diagnostics without publishing over MQTT, use `--dry-run` and `-v`. Use `-vv` to enable trace logging of CLI tool output; debug/trace modes pretty-print payloads and colorize logs. Add `--once` to publish a single payload and exit. Use `--dump-json out.json` to write the payload to disk for inspection or schema checks.
 
 ## Configuration
 The exporter reads a CFG/INI style configuration file. See `config/example.cfg` for defaults.

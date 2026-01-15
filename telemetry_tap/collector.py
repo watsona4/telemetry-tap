@@ -134,7 +134,9 @@ class MetricsCollector:
                 }
             )
 
-        temps = psutil.sensors_temperatures(fahrenheit=False)
+        temps = None
+        if hasattr(psutil, "sensors_temperatures"):
+            temps = psutil.sensors_temperatures(fahrenheit=False)
         if temps:
             for entries in temps.values():
                 if entries:
@@ -282,6 +284,9 @@ class MetricsCollector:
         return ifaces
 
     def _collect_batteries(self) -> list[dict[str, Any]]:
+        if not hasattr(psutil, "sensors_battery"):
+            self.logger.debug("Battery sensors not supported on this platform.")
+            return []
         battery = psutil.sensors_battery()
         if battery is None:
             self.logger.debug("No battery data available.")

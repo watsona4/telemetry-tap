@@ -678,6 +678,8 @@ class MetricsCollector:
         except OSError:
             self.logger.debug("Failed to fetch LibreHardwareMonitor JSON.")
             return None
+        if self.logger.isEnabledFor(TRACE_LEVEL):
+            self.logger.log(TRACE_LEVEL, "LibreHardwareMonitor raw payload: %s", payload)
         try:
             raw = json.loads(payload)
         except json.JSONDecodeError:

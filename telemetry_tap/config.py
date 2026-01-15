@@ -29,6 +29,8 @@ class PublishConfig:
 class CollectorConfig:
     smartctl_path: str
     lsblk_path: str
+    sensors_path: str
+    dmidecode_path: str
     librehardwaremonitor_url: str | None
 
 
@@ -77,6 +79,8 @@ def load_config(path: str | Path) -> AppConfig:
     collector = CollectorConfig(
         smartctl_path=str(collector_section.get("smartctl_path", "smartctl")),
         lsblk_path=str(collector_section.get("lsblk_path", "lsblk")),
+        sensors_path=str(collector_section.get("sensors_path", "sensors")),
+        dmidecode_path=str(collector_section.get("dmidecode_path", "dmidecode")),
         librehardwaremonitor_url=_get_optional(
             collector_section.get("librehardwaremonitor_url")
         ),

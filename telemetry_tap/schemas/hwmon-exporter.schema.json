@@ -1,0 +1,1689 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/hwmon-exporter.schema.json",
+  "title": "hwmon-exporter payload",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "object",
+      "description": "Metadata identifying the payload format and its version.",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "const": "hwmon-exporter",
+          "description": "Static identifier for the payload schema, used to confirm the message type."
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Schema version number for forwards/backwards compatibility."
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ]
+    },
+    "ts": {
+      "type": "string",
+      "description": "Timestamp when this payload was generated, in RFC 3339 date-time format.",
+      "format": "date-time"
+    },
+    "host": {
+      "type": "object",
+      "description": "Host identity and OS/runtime details for the machine producing the payload.",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Hostname of the machine generating the payload."
+        },
+        "system": {
+          "type": "string",
+          "description": "Broad system family (for example: Windows, Linux, Darwin)."
+        },
+        "os": {
+          "type": "string",
+          "description": "OS distribution or edition string (for example: Ubuntu, Windows 11)."
+        },
+        "release": {
+          "type": "string",
+          "description": "OS release/version string (for example: kernel version or Windows build)."
+        },
+        "machine": {
+          "type": "string",
+          "description": "Hardware/architecture identifier (for example: x86_64, AMD64, arm64)."
+        },
+        "python": {
+          "type": "string",
+          "description": "Python version string used to run the exporter."
+        },
+        "boot_time": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the host last booted, in RFC 3339 date-time format."
+        },
+        "uptime_s": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Host uptime in seconds at the time the payload was generated."
+        }
+      },
+      "required": [
+        "name",
+        "system",
+        "os",
+        "boot_time",
+        "uptime_s"
+      ]
+    },
+    "health": {
+      "type": "object",
+      "description": "High-level health status and supporting details from system checks.",
+      "additionalProperties": false,
+      "required": [
+        "overall_ok",
+        "issues"
+      ],
+      "properties": {
+        "overall_ok": {
+          "type": "boolean",
+          "description": "Overall health result summarizing checks, true if no issues are detected."
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true,
+          "description": "Human-readable list of detected issues contributing to overall health status."
+        },
+        "updates": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "Update mechanism/source used to collect update status (for example: apt, winget, dnf)."
+            },
+            "pending": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Count of pending updates, if known."
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Package/application name with a pending update."
+                  },
+                  "version": {
+                    "type": "string",
+                    "description": "Currently installed version (if known)."
+                  },
+                  "available": {
+                    "type": "string",
+                    "description": "Available update version (if known)."
+                  }
+                }
+              },
+              "description": "Optional list of individual pending update entries."
+            }
+          },
+          "description": "Information about pending software updates on the host, if available."
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "ok",
+              "status"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Service name or identifier."
+              },
+              "ok": {
+                "type": "boolean",
+                "description": "True if the service is in the expected healthy state."
+              },
+              "status": {
+                "enum": [
+                  "failed",
+                  "active",
+                  "inactive",
+                  "activating",
+                  "deactivating"
+                ],
+                "type": "string",
+                "description": "Service status string."
+              },
+              "detail": {
+                "type": "string",
+                "description": "Optional detail explaining failures or unexpected status."
+              },
+              "loaded": {
+                "enum": [
+                  "loaded",
+                  "not-found",
+                  "error",
+                  "masked"
+                ],
+                "type": "string",
+                "description": "Service availability string."
+              }
+            }
+          },
+          "description": "Service health checks for OS-managed services of interest."
+        },
+        "containers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "ok",
+              "status"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Container name or identifier."
+              },
+              "ok": {
+                "type": "boolean",
+                "description": "True if the container is in the expected healthy state."
+              },
+              "status": {
+                "enum": [
+                  "running",
+                  "unhealthy",
+                  "exited",
+                  "restarting",
+                  "created",
+                  "removing",
+                  "paused",
+                  "dead",
+                  "starting",
+                  "healthy"
+                ],
+                "type": "string",
+                "description": "Container status string."
+              },
+              "image": {
+                "type": "string",
+                "description": "Container image reference (repository:tag or digest), if known."
+              },
+              "detail": {
+                "type": "string",
+                "description": "Optional detail explaining failures or unexpected status."
+              }
+            }
+          },
+          "description": "Container health checks for containerized workloads of interest."
+        }
+      }
+    },
+    "motherboard": {
+      "type": "object",
+      "description": "Motherboard/platform telemetry when available (commonly via LibreHardwareMonitor, hwmon, IPMI, or vendor tools).",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Motherboard model/name as reported by the collector (for example: 'ASUS ROG STRIX B550-F')."
+        },
+        "manufacturer": {
+          "type": "string",
+          "description": "Motherboard manufacturer/vendor string, if available."
+        },
+        "bios_version": {
+          "type": "string",
+          "description": "BIOS/UEFI version string, if available."
+        },
+        "bios_date": {
+          "type": "string",
+          "description": "BIOS/UEFI release date string as reported by the collector, if available."
+        },
+        "temps": {
+          "type": "array",
+          "description": "Temperature sensors on the motherboard platform (chipset, VRM/MOS, socket, ambient/case probes), if available.",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Sensor label (for example: 'Chipset', 'VRM MOS', 'Motherboard', 'T_Sensor')."
+              },
+              "temp_c": {
+                "type": "number",
+                "description": "Temperature reading in degrees Celsius."
+              },
+              "max_c": {
+                "type": "number",
+                "description": "Observed maximum temperature in degrees Celsius since collector start, if available."
+              },
+              "source": {
+                "type": "string",
+                "description": "Collector/source (for example: 'lhm', 'hwmon', 'ipmi')."
+              }
+            },
+            "required": [
+              "name",
+              "temp_c"
+            ]
+          }
+        },
+        "fans": {
+          "type": "array",
+          "description": "Fan and pump tachometer readings, if available.",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Fan header label (for example: 'CPU Fan', 'Chassis Fan 1', 'AIO Pump')."
+              },
+              "rpm": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Current fan speed in RPM."
+              },
+              "min_rpm": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Minimum/expected RPM (or observed minimum) if available."
+              },
+              "max_rpm": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Maximum/observed RPM if available."
+              },
+              "pct": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Fan control percentage (0–100) if the controller exposes it."
+              },
+              "mode": {
+                "type": "string",
+                "description": "Control mode if reported (for example: 'PWM', 'DC', 'Auto')."
+              },
+              "source": {
+                "type": "string",
+                "description": "Collector/source (for example: 'lhm', 'hwmon', 'ipmi')."
+              }
+            },
+            "required": [
+              "name",
+              "rpm"
+            ]
+          }
+        },
+        "voltages": {
+          "type": "array",
+          "description": "Voltage rails and regulator measurements (Vcore, DRAM, +12V, +5V, +3.3V) when exposed by the platform.",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Voltage rail label (for example: 'Vcore', 'DRAM', '+12V', '+5V', '+3.3V')."
+              },
+              "voltage_v": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Voltage reading in volts."
+              },
+              "min_v": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Observed minimum voltage in volts since collector start, if available."
+              },
+              "max_v": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Observed maximum voltage in volts since collector start, if available."
+              },
+              "source": {
+                "type": "string",
+                "description": "Collector/source (for example: 'lhm', 'hwmon', 'ipmi')."
+              }
+            },
+            "required": [
+              "name",
+              "voltage_v"
+            ]
+          }
+        },
+        "currents": {
+          "type": "array",
+          "description": "Current sensors (amps) for CPU VRM/rails or board sensors, if available.",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Current sensor label (for example: 'CPU VRM', 'CPU Package Current')."
+              },
+              "current_a": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Current reading in amps."
+              },
+              "source": {
+                "type": "string",
+                "description": "Collector/source (for example: 'lhm', 'hwmon', 'ipmi')."
+              }
+            },
+            "required": [
+              "name",
+              "current_a"
+            ]
+          }
+        },
+        "powers": {
+          "type": "array",
+          "description": "Power sensors (watts) for platform subsystems (VRM, CPU package, SoC) when the board exposes them.",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Power sensor label (for example: 'CPU Package', 'VRM', 'SoC')."
+              },
+              "power_w": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Power reading in watts."
+              },
+              "source": {
+                "type": "string",
+                "description": "Collector/source (for example: 'lhm', 'hwmon', 'ipmi')."
+              }
+            },
+            "required": [
+              "name",
+              "power_w"
+            ]
+          }
+        },
+        "chassis": {
+          "type": "object",
+          "description": "Optional chassis-level indicators (when a controller reports them).",
+          "additionalProperties": false,
+          "properties": {
+            "intrusion": {
+              "type": "boolean",
+              "description": "Chassis intrusion state if available (true indicates an intrusion event/state)."
+            },
+            "source": {
+              "type": "string",
+              "description": "Collector/source for chassis indicators (for example: 'ipmi', 'lhm')."
+            }
+          }
+        }
+      }
+    },
+    "psus": {
+      "type": "array",
+      "description": "Power supply telemetry. Supports multiple PSUs (redundant or multi-rail setups) when the platform exposes data (IPMI, vendor tools, LHM).",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "PSU identifier/name (for example: 'PSU 1', 'Corsair RM850x', 'Redundant PSU A')."
+          },
+          "manufacturer": {
+            "type": "string",
+            "description": "PSU manufacturer/vendor string, if available."
+          },
+          "model": {
+            "type": "string",
+            "description": "PSU model string, if available."
+          },
+          "serial_number": {
+            "type": "string",
+            "description": "PSU serial number, if available."
+          },
+          "rated_power_w": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Rated maximum output power in watts, if known."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "warning",
+              "critical",
+              "unknown"
+            ],
+            "description": "Overall PSU status/health summary if provided by the source."
+          },
+          "present": {
+            "type": "boolean",
+            "description": "True if the PSU is present/detected (useful for redundant PSUs)."
+          },
+          "temp_c": {
+            "type": "number",
+            "description": "PSU internal temperature in degrees Celsius, if available."
+          },
+          "fan_rpm": {
+            "type": "number",
+            "minimum": 0,
+            "description": "PSU fan speed in RPM, if available."
+          },
+          "input": {
+            "type": "object",
+            "description": "PSU input-side telemetry (AC input where available).",
+            "additionalProperties": false,
+            "properties": {
+              "voltage_v": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Input voltage in volts (typically AC RMS), if available."
+              },
+              "power_w": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Input power in watts, if available."
+              },
+              "current_a": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Input current in amps, if available."
+              },
+              "frequency_hz": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Input AC frequency in hertz, if available."
+              }
+            }
+          },
+          "output_total": {
+            "type": "object",
+            "description": "Total output telemetry (all rails combined) when provided by the PSU/controller.",
+            "additionalProperties": false,
+            "properties": {
+              "power_w": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Total output power in watts, if available."
+              },
+              "current_a": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Total output current in amps, if available."
+              }
+            }
+          },
+          "rails": {
+            "type": "array",
+            "description": "Per-rail output telemetry (commonly +12V, +5V, +3.3V, +5VSB) when exposed.",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Rail name (for example: '+12V', '+5V', '+3.3V', '+5VSB')."
+                },
+                "voltage_v": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Rail voltage in volts, if available."
+                },
+                "current_a": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Rail current in amps, if available."
+                },
+                "power_w": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Rail power in watts, if available."
+                }
+              },
+              "required": [
+                "name"
+              ]
+            }
+          },
+          "limits": {
+            "type": "object",
+            "description": "Optional PSU limits/thresholds when provided by the source.",
+            "additionalProperties": false,
+            "properties": {
+              "overtemp_c": {
+                "type": "number",
+                "description": "Over-temperature threshold in degrees Celsius, if available."
+              },
+              "overpower_w": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Over-power threshold in watts, if available."
+              },
+              "overcurrent_a": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Over-current threshold in amps (total or rail-specific depending on source), if available."
+              }
+            }
+          },
+          "source": {
+            "type": "string",
+            "description": "Collector/source that produced PSU telemetry (for example: 'ipmi', 'lhm', 'vendor')."
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    },
+    "cpus": {
+      "type": "array",
+      "description": "CPU metrics grouped by CPU package/socket as available from the collector.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "temp_c": {
+            "type": "number",
+            "description": "CPU temperature in degrees Celsius, if available."
+          },
+          "num_cores": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Number of CPU cores represented by this CPU entry."
+          },
+          "cores": {
+            "type": "array",
+            "items": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "factor": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Core scaling factor or multiplier as reported by the source, if available."
+                },
+                "threads": {
+                  "type": "array",
+                  "items": {
+                    "additionalProperties": false,
+                    "type": "object",
+                    "properties": {
+                      "load_pct": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 100,
+                        "description": "Thread utilization percentage."
+                      },
+                      "name": {
+                        "type": "string",
+                        "description": "Thread identifier (for example: “Thread 0” or logical CPU name)."
+                      }
+                    },
+                    "required": [
+                      "load_pct",
+                      "name"
+                    ]
+                  },
+                  "minItems": 1,
+                  "description": "Per-thread metrics for this core."
+                },
+                "voltage_v": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Per-core voltage in volts, if available."
+                },
+                "power_w": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Per-core power draw in watts, if available."
+                },
+                "clock_hz": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Per-core clock frequency in hertz, if available."
+                },
+                "name": {
+                  "type": "string",
+                  "description": "Core identifier (for example: “Core 0”)."
+                }
+              },
+              "required": [
+                "threads",
+                "name"
+              ]
+            },
+            "minItems": 1,
+            "description": "Per-core metrics for this CPU entry."
+          },
+          "voltage_core_v": {
+            "type": "number",
+            "minimum": 0,
+            "description": "CPU core voltage in volts, if available."
+          },
+          "voltage_soc_v": {
+            "type": "number",
+            "minimum": 0,
+            "description": "CPU SoC/uncore voltage in volts, if available."
+          },
+          "load_1m": {
+            "type": "number",
+            "minimum": 0,
+            "description": "1-minute load average (platform-dependent; may be absent on some systems)."
+          },
+          "load_5m": {
+            "type": "number",
+            "minimum": 0,
+            "description": "5-minute load average (platform-dependent; may be absent on some systems)."
+          },
+          "load_15m": {
+            "type": "number",
+            "minimum": 0,
+            "description": "15-minute load average (platform-dependent; may be absent on some systems)."
+          },
+          "load_pct": {
+            "type": "number",
+            "minimum": 0,
+            "description": "CPU utilization percentage for this CPU entry."
+          },
+          "name": {
+            "type": "string",
+            "description": "Collector-provided CPU identifier (for example: “CPU”, “Package 0”, “AMD Ryzen …”)."
+          }
+        },
+        "required": [
+          "num_cores",
+          "load_pct",
+          "name",
+          "cores"
+        ]
+      },
+      "minItems": 1
+    },
+    "memory": {
+      "type": "object",
+      "description": "System memory usage metrics.",
+      "additionalProperties": false,
+      "properties": {
+        "system": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "used_b": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Bytes of physical memory currently used."
+            },
+            "load_pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "Physical memory utilization percentage, if available."
+            },
+            "available_b": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Bytes of physical memory currently available."
+            }
+          },
+          "required": [
+            "used_b",
+            "available_b"
+          ],
+          "description": "Physical memory usage for the host."
+        },
+        "virtual": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "used_b": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Bytes of virtual memory currently used (swap/pagefile), if available."
+            },
+            "load_pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "Virtual memory utilization percentage, if available."
+            },
+            "available_b": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Bytes of virtual memory currently available (swap/pagefile), if available."
+            }
+          },
+          "required": [
+            "used_b",
+            "available_b"
+          ],
+          "description": "Virtual memory or swap/pagefile usage for the host, if available."
+        }
+      },
+      "required": [
+        "system"
+      ]
+    },
+    "gpus": {
+      "type": "array",
+      "description": "GPU metrics grouped by GPU device.",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "GPU device name as reported by the collector."
+          },
+          "engines": {
+            "type": "array",
+            "items": {
+              "additionalProperties": false,
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Engine name as reported by the collector."
+                },
+                "load_pct": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100,
+                  "description": "Engine utilization percentage."
+                }
+              },
+              "required": [
+                "name",
+                "load_pct"
+              ]
+            },
+            "description": "Per-engine utilization metrics (for example: 3D, Copy, Video Decode)."
+          },
+          "temp_c": {
+            "type": "number",
+            "description": "GPU temperature in degrees Celsius, if available."
+          },
+          "core": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "voltage_v": {
+                "type": "number",
+                "minimum": 0,
+                "description": "GPU core voltage in volts, if available."
+              },
+              "power_w": {
+                "type": "number",
+                "minimum": 0,
+                "description": "GPU core power draw in watts, if available."
+              },
+              "clock_hz": {
+                "type": "number",
+                "minimum": 0,
+                "description": "GPU core clock frequency in hertz, if available."
+              },
+              "load_pct": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "GPU core utilization percentage."
+              },
+              "name": {
+                "type": "string",
+                "description": "Core domain name as reported by the collector (for example: “Core”)."
+              }
+            },
+            "required": [
+              "load_pct",
+              "name"
+            ],
+            "description": "Core/graphics engine metrics for the GPU."
+          },
+          "soc": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "voltage_v": {
+                "type": "number",
+                "minimum": 0,
+                "description": "GPU SoC voltage in volts, if available."
+              },
+              "power_w": {
+                "type": "number",
+                "minimum": 0,
+                "description": "GPU SoC power draw in watts, if available."
+              },
+              "clock_hz": {
+                "type": "number",
+                "minimum": 0,
+                "description": "GPU SoC clock frequency in hertz, if available."
+              },
+              "load_pct": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "GPU SoC utilization percentage, if available."
+              }
+            },
+            "description": "SoC/uncore metrics for integrated GPUs or SoC-based devices, if available."
+          },
+          "fps": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Frames-per-second metric from the collector, if available."
+          },
+          "memory": {
+            "additionalProperties": false,
+            "type": "object",
+            "properties": {
+              "clock_hz": {
+                "type": "number",
+                "minimum": 0,
+                "description": "GPU memory clock frequency in hertz, if available."
+              },
+              "types": {
+                "type": "array",
+                "items": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "description": "Memory region/type name as reported by the collector."
+                    },
+                    "used_b": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Bytes of this GPU memory region currently used."
+                    },
+                    "available_b": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Bytes of this GPU memory region currently available."
+                    },
+                    "total_b": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Total bytes of this GPU memory region, if available."
+                    },
+                    "load_pct": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 100,
+                      "description": "Utilization percentage for this memory region, if available."
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "used_b",
+                    "available_b"
+                  ]
+                },
+                "description": "Per-memory-region metrics (for example: dedicated VRAM, shared/system)."
+              }
+            },
+            "required": [
+              "types"
+            ],
+            "description": "GPU memory metrics."
+          }
+        },
+        "required": [
+          "name",
+          "core",
+          "engines"
+        ]
+      }
+    },
+    "drives": {
+      "type": "array",
+      "description": "Physical drive/device metrics (device-level, independent of mountpoints).",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Drive identifier (for example: device name, logical name, or LHM drive label)."
+          },
+          "type": {
+            "type": "string",
+            "description": "Drive type/category (for example: SSD, HDD, NVMe), if available."
+          },
+          "manufacturer": {
+            "type": "string",
+            "description": "Drive manufacturer string, if available."
+          },
+          "temp_c": {
+            "type": "number",
+            "description": "Drive temperature in degrees Celsius, if available."
+          },
+          "used_b": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Bytes used on the drive, if available from the collector."
+          },
+          "available_b": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Bytes available on the drive, if available from the collector."
+          },
+          "read_rate_bps": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Current read throughput in bytes per second, if available."
+          },
+          "write_rate_bps": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Current write throughput in bytes per second, if available."
+          },
+          "total_read_b": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Total bytes read since boot or since the collector’s reference point, if available."
+          },
+          "total_write_b": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Total bytes written since boot or since the collector’s reference point, if available."
+          },
+          "read_activity_pct": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Read activity percentage, if available."
+          },
+          "write_activity_pct": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Write activity percentage, if available."
+          },
+          "listed_cap_b": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Manufacturer-reported capacity of the drive in bytes, if available."
+          },
+          "model": {
+            "type": "string",
+            "description": "Drive model string, if available."
+          },
+          "smart": {
+            "type": "object",
+            "description": "SMART / health metrics reported by the drive (via smartctl or equivalent). Fields vary by protocol (NVMe vs SATA/ATA).",
+            "additionalProperties": false,
+            "properties": {
+              "overall_health": {
+                "type": "string",
+                "description": "Overall SMART health assessment, if provided (for example: PASSED, FAILED, UNKNOWN)."
+              },
+              "power_on_hours": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Drive power-on hours as reported by the device, if available."
+              },
+              "critical_warning": {
+                "type": "string",
+                "description": "NVMe critical warning field as reported by the device (often a hex string or bitmask)."
+              },
+              "available_spare_pct": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "NVMe available spare percentage, if reported."
+              },
+              "available_spare_threshold_pct": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "NVMe spare threshold percentage at which a warning is triggered, if reported."
+              },
+              "percentage_used_pct": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "NVMe endurance used percentage (wear indicator), if reported."
+              },
+              "data_units_read": {
+                "type": "number",
+                "minimum": 0,
+                "description": "NVMe data units read counter (unit semantics are NVMe-defined; the exporter may keep it as a raw counter)."
+              },
+              "data_units_written": {
+                "type": "number",
+                "minimum": 0,
+                "description": "NVMe data units written counter (unit semantics are NVMe-defined; the exporter may keep it as a raw counter)."
+              },
+              "host_read_commands": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "NVMe host read command count, if reported."
+              },
+              "host_write_commands": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "NVMe host write command count, if reported."
+              },
+              "controller_busy_time": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "NVMe controller busy time, typically in minutes, if reported."
+              },
+              "power_cycles": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Power cycle count, if reported."
+              },
+              "unsafe_shutdowns": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Unsafe shutdown count (NVMe), if reported."
+              },
+              "media_errors": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Media/data integrity error count (NVMe) or equivalent, if reported."
+              },
+              "num_err_log_entries": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Error log entry count (NVMe), if reported."
+              },
+              "thermal": {
+                "type": "object",
+                "description": "Thermal history/counters (commonly NVMe), if reported.",
+                "additionalProperties": false,
+                "properties": {
+                  "warning_temp_time": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Time spent above warning temperature threshold, if reported (device-defined unit, often minutes)."
+                  },
+                  "critical_temp_time": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Time spent above critical temperature threshold, if reported (device-defined unit, often minutes)."
+                  },
+                  "thermal_mgmt_t1_trans_count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Thermal management transition count for threshold 1, if reported."
+                  },
+                  "thermal_mgmt_t2_trans_count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Thermal management transition count for threshold 2, if reported."
+                  },
+                  "thermal_mgmt_t1_total_time": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Total time under thermal management condition 1, if reported (device-defined unit)."
+                  },
+                  "thermal_mgmt_t2_total_time": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Total time under thermal management condition 2, if reported (device-defined unit)."
+                  }
+                }
+              }
+            }
+          },
+          "serial_number": {
+            "type": "string",
+            "description": "Drive serial number, if reported by the device."
+          },
+          "firmware_version": {
+            "type": "string",
+            "description": "Drive firmware revision string, if reported by the device."
+          }
+        },
+        "required": [
+          "name",
+          "used_b",
+          "available_b",
+          "type",
+          "manufacturer",
+          "model"
+        ]
+      }
+    },
+    "filesystems": {
+      "type": "array",
+      "description": "Filesystem/mountpoint usage and IO metrics (mount-level).",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Filesystem or volume name/label as reported by the collector."
+          },
+          "mountpoint": {
+            "type": "string",
+            "description": "Mountpoint or drive letter path for the filesystem."
+          },
+          "format": {
+            "type": "string",
+            "description": "Filesystem format/type (for example: ext4, xfs, btrfs, ntfs)."
+          },
+          "used_b": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Bytes used on this filesystem."
+          },
+          "available_b": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Bytes available on this filesystem."
+          },
+          "read_rate_bps": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Current filesystem read throughput in bytes per second, if available."
+          },
+          "write_rate_bps": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Current filesystem write throughput in bytes per second, if available."
+          },
+          "read_activity_pct": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Filesystem read activity percentage, if available."
+          },
+          "write_activity_pct": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Filesystem write activity percentage, if available."
+          }
+        },
+        "required": [
+          "name",
+          "mountpoint",
+          "format",
+          "used_b",
+          "available_b"
+        ]
+      }
+    },
+    "batteries": {
+      "type": "array",
+      "description": "Battery metrics grouped by battery device (for laptops/UPS when exposed as a battery).",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "description": "",
+        "properties": {
+          "discharging": {
+            "type": "boolean",
+            "description": "True if the battery is currently discharging."
+          },
+          "remain_cap_mwh": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Remaining capacity in milliamp-hours or milliwatt-hours as reported by the source (unit is source-dependent), if available."
+          },
+          "full_cap_mwh": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Full-charge capacity in source-reported units, if available."
+          },
+          "design_cap_mwh": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Design capacity in source-reported units, if available."
+          },
+          "degradation_pct": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Estimated capacity degradation percentage relative to design capacity, if available."
+          },
+          "charge_level_pct": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Current charge percentage (0–100)."
+          },
+          "power_w": {
+            "type": "number",
+            "description": "Battery power in watts (sign convention is source-dependent), if available."
+          },
+          "current_a": {
+            "type": "number",
+            "description": "Battery current in amps (sign convention is source-dependent), if available."
+          },
+          "voltage_v": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Battery voltage in volts, if available."
+          },
+          "name": {
+            "type": "string",
+            "description": "Battery identifier/name as reported by the collector."
+          }
+        },
+        "required": [
+          "discharging",
+          "charge_level_pct",
+          "name"
+        ]
+      }
+    },
+    "ifaces": {
+      "type": "array",
+      "description": "Network interface metrics grouped by interface.",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Network interface name as reported by the OS (for example: eth0, eno1, Wi-Fi)."
+          },
+          "mac": {
+            "type": "string",
+            "description": "MAC address for the interface."
+          },
+          "ipv4": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "ipv4"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Primary IPv4 address for the interface, or null if none is assigned."
+          },
+          "ipv6": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "ipv6"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Primary IPv6 address for the interface, or null if none is assigned."
+          },
+          "utilization_pct": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Link utilization percentage derived from traffic rate and link speed, if available."
+          },
+          "rate_up_bps": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Current transmit rate in bytes per second, if available."
+          },
+          "rate_down_bps": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Current receive rate in bytes per second, if available."
+          },
+          "data_down_b": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Total bytes received since boot or since the collector’s reference point, if available."
+          },
+          "data_up_b": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Total bytes transmitted since boot or since the collector’s reference point, if available."
+          }
+        },
+        "required": [
+          "name",
+          "mac",
+          "ipv4",
+          "ipv6"
+        ]
+      }
+    },
+    "tpus": {
+      "type": "array",
+      "description": "Metrics for tensor processing accelerator devices (vendor-agnostic, similar to GPUs).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "TPU device name or identifier as reported by the collector."
+          },
+          "vendor": {
+            "type": "string",
+            "description": "Vendor string for the TPU device, if available."
+          },
+          "model": {
+            "type": "string",
+            "description": "TPU model string, if available."
+          },
+          "temp_c": {
+            "type": "number",
+            "description": "TPU temperature in degrees Celsius, if available."
+          },
+          "power_w": {
+            "type": "number",
+            "description": "TPU power draw in watts, if available."
+          },
+          "clock_hz": {
+            "type": "number",
+            "description": "TPU core clock frequency in hertz, if available."
+          },
+          "load_pct": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "TPU utilization percentage (0–100) representing overall compute activity."
+          },
+          "memory": {
+            "type": "object",
+            "description": "TPU memory metrics, if the device exposes onboard or reserved memory.",
+            "properties": {
+              "used_b": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Bytes of TPU memory currently used, if available."
+              },
+              "available_b": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Bytes of TPU memory currently available, if available."
+              },
+              "total_b": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Total bytes of TPU memory, if available."
+              },
+              "load_pct": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "TPU memory utilization percentage (0–100), if available."
+              }
+            }
+          },
+          "engines": {
+            "type": "array",
+            "description": "Optional per-engine or per-unit metrics when the TPU exposes subcomponents.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Engine/unit name (for example: “Matrix”, “DMA”, “Host Interface”)."
+                },
+                "load_pct": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100,
+                  "description": "Engine utilization percentage (0–100), if available."
+                }
+              },
+              "required": [
+                "name"
+              ]
+            },
+            "minItems": 1
+          },
+          "inference": {
+            "type": "object",
+            "description": "Optional inference-performance metrics exposed by the TPU runtime or an application using it.",
+            "properties": {
+              "latency_ms": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Average inference latency in milliseconds per inference unit (for example, per frame or per request), if available."
+              },
+              "utilization_context": {
+                "type": "string",
+                "description": "Short description of what the throughput/latency measurements represent (for example: “frigate detector”, “tflite delegate”), if available."
+              },
+              "window_s": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Time window in seconds over which throughput/latency was computed, if available."
+              },
+              "throughput_per_s": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Inference throughput in frames per second (or equivalent units per second) when the TPU is used for real-time inference workloads."
+              },
+              "throughput_unit": {
+                "type": "string",
+                "enum": [
+                  "inferences",
+                  "frames",
+                  "requests",
+                  "samples",
+                  "other"
+                ],
+                "description": "Unit label for throughput_per_s. Use 'frames' for Frigate-style FPS, 'inferences' for generic TPU benchmarking."
+              }
+            }
+          },
+          "thermal": {
+            "type": "object",
+            "description": "Thermal policy, limits, and throttling indicators for the TPU device.",
+            "properties": {
+              "temp_c": {
+                "type": "number",
+                "description": "Current TPU temperature in degrees Celsius."
+              },
+              "warning_c": {
+                "type": "number",
+                "description": "Warning threshold temperature in degrees Celsius above which performance may be reduced or a warning should be raised."
+              },
+              "critical_c": {
+                "type": "number",
+                "description": "Critical temperature threshold in degrees Celsius at which throttling or shutdown may occur, if available."
+              },
+              "throttling": {
+                "type": "boolean",
+                "description": "Indicates whether the device is currently thermally throttled (underclocked) due to temperature."
+              },
+              "dfs": {
+                "type": "object",
+                "description": "Dynamic frequency scaling",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "states": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "trip_point_c": {
+                          "type": "number"
+                        },
+                        "clock_limit_hz": {
+                          "type": "number",
+                          "minimum": 0
+                        }
+                      }
+                    }
+                  },
+                  "active_state": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              }
+            }
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "minItems": 1
+    },
+    "backup_providers": {
+      "type": "array",
+      "description": "Backup system state and recent activity for one or more backup targets/providers.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Human-friendly name for the backup target (for example: “nas”, “offsite”, “usb”)."
+          },
+          "type": {
+            "type": "string",
+            "description": "Backup system type (for example: “borg”, “restic”, “zfs-send”, “rsync”, “snapshot”)."
+          },
+          "repo": {
+            "type": "string",
+            "description": "Repository/target identifier or path (can be a filesystem path, URL, or opaque identifier), if applicable."
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "True if the backup target is currently considered healthy based on the exporter’s checks."
+          },
+          "last_run_ts": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Timestamp of the most recent backup run attempt, if known."
+          },
+          "last_success_ts": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Timestamp of the most recent successful backup run, if known."
+          },
+          "last_status": {
+            "type": "string",
+            "description": "Status string for the most recent run (for example: success, failed, partial, running, unknown)."
+          },
+          "last_error": {
+            "type": "string",
+            "description": "Short error message from the most recent failed run, if applicable."
+          },
+          "age_s": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Seconds since last successful backup, if known."
+          },
+          "duration_s": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Duration in seconds of the most recent run, if known."
+          },
+          "bytes_added": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Bytes added by the most recent backup run, if known."
+          },
+          "bytes_pruned": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Bytes removed/pruned by the most recent maintenance/prune step, if known."
+          },
+          "repo_size_b": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Current repository size in bytes, if known."
+          },
+          "compression": {
+            "type": "string",
+            "description": "Compression mode/setting as reported by the backup system, if known."
+          },
+          "encryption": {
+            "type": "string",
+            "description": "Encryption mode/setting as reported by the backup system, if known."
+          },
+          "integrity": {
+            "type": "object",
+            "description": "Repository integrity/verification status when supported.",
+            "properties": {
+              "last_check_ts": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Timestamp of the last integrity check/verify operation, if known."
+              },
+              "status": {
+                "type": "string",
+                "description": "Status string for integrity (for example: ok, warnings, errors, unknown)."
+              },
+              "detail": {
+                "type": "string",
+                "description": "Optional short detail for integrity warnings/errors."
+              }
+            }
+          },
+          "retention": {
+            "type": "object",
+            "description": "Retention policy summary if the system exposes it.",
+            "properties": {
+              "policy": {
+                "type": "string",
+                "description": "Human-readable description of retention policy (for example: “daily=7, weekly=4, monthly=6”)."
+              },
+              "snapshots": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Count of retained snapshots/archives, if known."
+              }
+            }
+          }
+        },
+        "required": [
+          "name",
+          "type",
+          "ok"
+        ]
+      },
+      "minItems": 1
+    }
+  },
+  "required": [
+    "schema",
+    "ts",
+    "host",
+    "health",
+    "cpus",
+    "memory"
+  ]
+}

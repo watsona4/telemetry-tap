@@ -21,6 +21,7 @@ classifiers = [
 dependencies = [
   "psutil>=5.9.8",
   "paho-mqtt>=1.6.1",
+  "jsonschema>=4.21.1",
 ]
 
 [project.scripts]
@@ -32,3 +33,4 @@ include = ["telemetry_tap*"]
 
 [tool.setuptools]
 package-dir = {"" = "."}
+package-data = {"telemetry_tap" = ["schemas/*.json"]}

@@ -7,7 +7,9 @@ import time
 
 from telemetry_tap.collector import MetricsCollector
 from telemetry_tap.config import load_config
+from telemetry_tap.logging_utils import configure_logging, resolve_log_level
 from telemetry_tap.mqtt_client import MqttPublisher
+from telemetry_tap.schema import validate_payload
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,6 +25,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Logging level (DEBUG, INFO, WARNING, ERROR)",
     )
     parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Enable debug logging (-v) or trace logging (-vv)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Log payloads without publishing to MQTT",
@@ -34,7 +43,8 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    logging.basicConfig(level=args.log_level.upper(), format="%(asctime)s %(message)s")
+    level = resolve_log_level(args.verbose, args.log_level)
+    configure_logging(level)
     logger = logging.getLogger("telemetry_tap")
     config = load_config(args.config)
 
@@ -44,6 +54,10 @@ def main() -> None:
         publisher.connect()
 
     initial_payload = collector.collect()
+    schema_errors = validate_payload(initial_payload)
+    if schema_errors:
+        logger.warning("Schema validation failed with %s errors.", len(schema_errors))
+        logger.debug("Schema errors: %s", schema_errors)
     initial_json = json.dumps(initial_payload)
     if args.dry_run:
         logger.info("Dry run enabled; skipping MQTT publish.")
@@ -59,6 +73,12 @@ def main() -> None:
     try:
         while True:
             payload = collector.collect()
+            schema_errors = validate_payload(payload)
+            if schema_errors:
+                logger.warning(
+                    "Schema validation failed with %s errors.", len(schema_errors)
+                )
+                logger.debug("Schema errors: %s", schema_errors)
             payload_json = json.dumps(payload)
             if args.dry_run:
                 logger.debug("Payload: %s", payload_json)

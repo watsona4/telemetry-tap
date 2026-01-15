@@ -15,6 +15,7 @@ from urllib.request import urlopen
 import psutil
 
 from telemetry_tap.config import CollectorConfig
+from telemetry_tap.logging_utils import TRACE_LEVEL
 
 SCHEMA_NAME = "hwmon-exporter"
 SCHEMA_VERSION = 1
@@ -69,7 +70,7 @@ class MetricsCollector:
         if batteries := self._collect_batteries():
             payload["batteries"] = batteries
 
-        motherboard = self._collect_lhm_board()
+        motherboard = self._collect_motherboard()
         if motherboard:
             payload["motherboard"] = motherboard
 
@@ -320,11 +321,8 @@ class MetricsCollector:
         if platform.system().lower() != "linux":
             self.logger.debug("Skipping lsblk drive metadata on non-Linux.")
             return {}
-        try:
-            output = subprocess.check_output(
-                [self.config.lsblk_path, "-J", "-O"], text=True
-            )
-        except (subprocess.SubprocessError, FileNotFoundError):
+        output = self._run_command([self.config.lsblk_path, "-J", "-O"])
+        if output is None:
             self.logger.debug("lsblk command failed or missing.")
             return {}
         try:
@@ -379,13 +377,10 @@ class MetricsCollector:
                 self.logger.debug("SMART data unavailable for %s.", device_path)
 
     def _smartctl_info(self, device_path: str) -> dict[str, Any] | None:
-        try:
-            output = subprocess.check_output(
-                [self.config.smartctl_path, "-a", "-j", device_path],
-                text=True,
-                stderr=subprocess.DEVNULL,
-            )
-        except (subprocess.SubprocessError, FileNotFoundError):
+        output = self._run_command(
+            [self.config.smartctl_path, "-a", "-j", device_path], stderr=subprocess.DEVNULL
+        )
+        if output is None:
             self.logger.debug("smartctl failed for %s.", device_path)
             return None
         try:
@@ -425,6 +420,33 @@ class MetricsCollector:
             return smart
         return None
 
+    def _collect_motherboard(self) -> dict[str, Any] | None:
+        motherboard: dict[str, Any] = {}
+
+        lhm_board = self._collect_lhm_board()
+        if lhm_board:
+            self._merge_motherboard(motherboard, lhm_board)
+
+        sensors_board = self._collect_linux_sensors()
+        if sensors_board:
+            self._merge_motherboard(motherboard, sensors_board)
+
+        dmi_board = self._collect_dmidecode()
+        if dmi_board:
+            motherboard.update(dmi_board)
+
+        return motherboard if motherboard else None
+
+    def _merge_motherboard(
+        self, target: dict[str, Any], incoming: dict[str, Any]
+    ) -> None:
+        for key, value in incoming.items():
+            if isinstance(value, list):
+                target.setdefault(key, [])
+                target[key].extend(value)
+            else:
+                target.setdefault(key, value)
+
     def _collect_lhm_board(self) -> dict[str, Any] | None:
         data = self._read_lhm()
         if not data:
@@ -461,6 +483,137 @@ class MetricsCollector:
         if powers:
             motherboard["powers"] = powers
 
+        return motherboard if motherboard else None
+
+    def _collect_linux_sensors(self) -> dict[str, Any] | None:
+        if platform.system().lower() != "linux":
+            return None
+        output = self._run_command([self.config.sensors_path, "-j"])
+        if output is None:
+            return None
+        try:
+            data = json.loads(output)
+        except json.JSONDecodeError:
+            self.logger.debug("Failed to parse sensors JSON output.")
+            return None
+
+        temps: list[dict[str, Any]] = []
+        fans: list[dict[str, Any]] = []
+        voltages: list[dict[str, Any]] = []
+        currents: list[dict[str, Any]] = []
+        powers: list[dict[str, Any]] = []
+
+        for chip, chip_data in data.items():
+            if not isinstance(chip_data, dict):
+                continue
+            for label, readings in chip_data.items():
+                if not isinstance(readings, dict):
+                    continue
+                for key, value in readings.items():
+                    if not isinstance(value, (int, float)):
+                        continue
+                    entry_name = f"{chip} {label}"
+                    if key.endswith("_input"):
+                        if key.startswith("temp"):
+                            temps.append(
+                                {
+                                    "name": entry_name,
+                                    "temp_c": float(value),
+                                    "source": "sensors",
+                                }
+                            )
+                        elif key.startswith("fan"):
+                            fans.append(
+                                {
+                                    "name": entry_name,
+                                    "rpm": float(value),
+                                    "source": "sensors",
+                                }
+                            )
+                        elif key.startswith("in"):
+                            voltages.append(
+                                {
+                                    "name": entry_name,
+                                    "voltage_v": float(value),
+                                    "source": "sensors",
+                                }
+                            )
+                        elif key.startswith("curr"):
+                            currents.append(
+                                {
+                                    "name": entry_name,
+                                    "current_a": float(value),
+                                    "source": "sensors",
+                                }
+                            )
+                        elif key.startswith("power"):
+                            powers.append(
+                                {
+                                    "name": entry_name,
+                                    "power_w": float(value),
+                                    "source": "sensors",
+                                }
+                            )
+
+        motherboard: dict[str, Any] = {}
+        if temps:
+            motherboard["temps"] = temps
+        if fans:
+            motherboard["fans"] = fans
+        if voltages:
+            motherboard["voltages"] = voltages
+        if currents:
+            motherboard["currents"] = currents
+        if powers:
+            motherboard["powers"] = powers
+
+        return motherboard if motherboard else None
+
+    def _collect_dmidecode(self) -> dict[str, Any] | None:
+        if platform.system().lower() != "linux":
+            return None
+        output = self._run_command([self.config.dmidecode_path, "-t", "baseboard", "-t", "bios"])
+        if output is None:
+            return None
+        manufacturer = None
+        name = None
+        bios_version = None
+        bios_date = None
+        in_baseboard = False
+        in_bios = False
+        for line in output.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Base Board Information"):
+                in_baseboard = True
+                in_bios = False
+                continue
+            if stripped.startswith("BIOS Information"):
+                in_bios = True
+                in_baseboard = False
+                continue
+            if ":" not in stripped:
+                continue
+            key, value = [part.strip() for part in stripped.split(":", 1)]
+            if in_baseboard:
+                if key == "Manufacturer":
+                    manufacturer = value
+                elif key in {"Product Name", "Product"}:
+                    name = value
+            if in_bios:
+                if key == "Version":
+                    bios_version = value
+                elif key == "Release Date":
+                    bios_date = value
+
+        motherboard = {}
+        if name:
+            motherboard["name"] = name
+        if manufacturer:
+            motherboard["manufacturer"] = manufacturer
+        if bios_version:
+            motherboard["bios_version"] = bios_version
+        if bios_date:
+            motherboard["bios_date"] = bios_date
         return motherboard if motherboard else None
 
     def _collect_lhm_gpus(self) -> list[dict[str, Any]]:
@@ -507,6 +660,39 @@ class MetricsCollector:
             self.logger.debug("Failed to parse LibreHardwareMonitor JSON.")
             return None
         return self._parse_lhm(raw)
+
+    def _run_command(
+        self, command: list[str], stderr: int | None = None
+    ) -> str | None:
+        try:
+            if stderr is None:
+                result = subprocess.run(
+                    command,
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+            else:
+                result = subprocess.run(
+                    command,
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=stderr,
+                )
+        except FileNotFoundError:
+            self.logger.debug("Command not found: %s", command[0])
+            return None
+        if result.returncode != 0:
+            self.logger.debug(
+                "Command failed (%s): %s", result.returncode, " ".join(command)
+            )
+            if result.stderr:
+                self.logger.log(TRACE_LEVEL, "stderr: %s", result.stderr.strip())
+            return None
+        if result.stdout:
+            self.logger.log(TRACE_LEVEL, "stdout: %s", result.stdout.strip())
+        return result.stdout
 
     def _parse_lhm(self, raw: dict[str, Any]) -> dict[str, Any]:
         sensors: list[dict[str, Any]] = []

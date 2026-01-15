@@ -36,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Log payloads without publishing to MQTT",
     )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Collect and publish a single payload, then exit",
+    )
     return parser
 
 
@@ -67,6 +72,10 @@ def main() -> None:
         publisher.publish_discovery(initial_payload)
         publisher.publish(initial_json)
         publisher.loop()
+
+    if args.once:
+        logger.info("Single-run mode enabled; exiting after initial payload.")
+        return
 
     interval = max(1, config.publish.interval_s)
     logging.info("Telemetry Tap started. Publishing every %s seconds.", interval)

@@ -481,7 +481,7 @@ class MetricsCollector:
         voltages: list[dict[str, Any]] = []
         powers: list[dict[str, Any]] = []
 
-        for sensor in data.get("sensors", []):
+        for sensor in data.get("motherboard_sensors", []):
             category = sensor.get("category")
             name = sensor.get("name")
             value = sensor.get("value")
@@ -719,68 +719,87 @@ class MetricsCollector:
         return result.stdout
 
     def _parse_lhm(self, raw: dict[str, Any]) -> dict[str, Any]:
-        sensors: list[dict[str, Any]] = []
+        motherboard_sensors: list[dict[str, Any]] = []
+        gpu_sensors: dict[str, list[dict[str, Any]]] = {}
         gpus: list[dict[str, Any]] = []
 
-        def walk(node: dict[str, Any], path: list[str]) -> None:
+        def walk(
+            node: dict[str, Any],
+            hardware_type: str | None,
+            gpu_name: str | None,
+        ) -> None:
             node_type = node.get("Type")
-            node_text = node.get("Text")
+            node_text = node.get("Text") or ""
+            next_hardware = hardware_type
+            next_gpu_name = gpu_name
+            if node_type == "Hardware":
+                raw_hardware = (node.get("HardwareType") or "").lower()
+                if raw_hardware.startswith("gpu"):
+                    next_hardware = "gpu"
+                elif raw_hardware in {"motherboard", "mainboard"}:
+                    next_hardware = "motherboard"
+                else:
+                    next_hardware = raw_hardware or hardware_type
+                if next_hardware == "gpu":
+                    gpus.append({"name": node_text})
+                    gpu_sensors.setdefault(node_text, [])
+                    next_gpu_name = node_text
+                for child in node.get("Children", []):
+                    walk(child, next_hardware, next_gpu_name)
+                return
             if node_type == "Sensor":
                 sensor_type = (node.get("SensorType") or "").lower()
-                if node.get("Value") is None:
+                value = node.get("Value")
+                if value is None:
                     return
-                sensors.append(
-                    {
-                        "category": sensor_type,
-                        "name": node_text,
-                        "value": float(node["Value"]),
-                    }
-                )
-                return
-            if node_text and "gpu" in node_text.lower() and node_type == "Hardware":
-                gpu_entry: dict[str, Any] = {
+                sensor_entry = {
+                    "category": sensor_type,
                     "name": node_text,
-                    "engines": [],
+                    "value": float(value),
                 }
-                for child in node.get("Children", []):
-                    walk(child, path + [node_text])
-                gpus.append(gpu_entry)
+                if hardware_type == "motherboard":
+                    motherboard_sensors.append(sensor_entry)
+                if hardware_type == "gpu":
+                    if gpu_name:
+                        gpu_sensors.setdefault(gpu_name, []).append(sensor_entry)
+                return
             for child in node.get("Children", []):
-                walk(child, path + [node_text or ""])
+                walk(child, next_hardware, next_gpu_name)
 
         for root in raw.get("Children", []):
-            walk(root, [])
+            walk(root, None, None)
 
-        parsed = {"sensors": sensors, "gpus": []}
-        if gpus:
-            gpu_map: dict[str, dict[str, Any]] = {gpu["name"]: gpu for gpu in gpus}
-            for sensor in sensors:
-                if sensor["category"] == "load":
-                    name = sensor["name"]
-                    for gpu_name, gpu_entry in gpu_map.items():
-                        if gpu_name in name:
-                            gpu_entry.setdefault("engines", []).append(
-                                {"name": name, "load": sensor["value"]}
-                            )
-                if sensor["category"] == "temperature":
-                    name = sensor["name"]
-                    for gpu_name, gpu_entry in gpu_map.items():
-                        if gpu_name in name:
-                            gpu_entry["temp_c"] = sensor["value"]
-            parsed["gpus"] = [
+        parsed_gpus: list[dict[str, Any]] = []
+        for gpu in gpus:
+            name = gpu.get("name")
+            sensors = gpu_sensors.get(name, [])
+            engines = [
+                {"name": sensor["name"], "load": sensor["value"]}
+                for sensor in sensors
+                if sensor["category"] == "load"
+            ]
+            temp = next(
+                (
+                    sensor["value"]
+                    for sensor in sensors
+                    if sensor["category"] == "temperature"
+                ),
+                None,
+            )
+            parsed_gpus.append(
                 {
-                    "name": gpu["name"],
-                    "engines": gpu.get("engines", []),
+                    "name": name,
+                    "engines": engines,
                     "core_load": next(
                         (
                             engine["load"]
-                            for engine in gpu.get("engines", [])
+                            for engine in engines
                             if "core" in engine["name"].lower()
                         ),
                         None,
                     ),
-                    "temp_c": gpu.get("temp_c"),
+                    "temp_c": temp,
                 }
-                for gpu in gpus
-            ]
-        return parsed
+            )
+
+        return {"motherboard_sensors": motherboard_sensors, "gpus": parsed_gpus}

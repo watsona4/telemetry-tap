@@ -47,6 +47,7 @@ def main() -> None:
     configure_logging(level)
     logger = logging.getLogger("telemetry_tap")
     config = load_config(args.config)
+    pretty_print = level <= logging.DEBUG
 
     collector = MetricsCollector(config.collector)
     publisher = MqttPublisher(config.mqtt)
@@ -58,7 +59,7 @@ def main() -> None:
     if schema_errors:
         logger.warning("Schema validation failed with %s errors.", len(schema_errors))
         logger.debug("Schema errors: %s", schema_errors)
-    initial_json = json.dumps(initial_payload)
+    initial_json = json.dumps(initial_payload, indent=2) if pretty_print else json.dumps(initial_payload)
     if args.dry_run:
         logger.info("Dry run enabled; skipping MQTT publish.")
         logger.debug("Initial payload: %s", initial_json)
@@ -79,7 +80,7 @@ def main() -> None:
                     "Schema validation failed with %s errors.", len(schema_errors)
                 )
                 logger.debug("Schema errors: %s", schema_errors)
-            payload_json = json.dumps(payload)
+            payload_json = json.dumps(payload, indent=2) if pretty_print else json.dumps(payload)
             if args.dry_run:
                 logger.debug("Payload: %s", payload_json)
             else:

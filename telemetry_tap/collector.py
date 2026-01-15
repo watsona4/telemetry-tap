@@ -105,17 +105,36 @@ class MetricsCollector:
 
     def _collect_cpus(self) -> list[dict[str, Any]]:
         per_cpu = psutil.cpu_percent(interval=None, percpu=True)
-        num_cores = len(per_cpu)
+        logical_count = len(per_cpu)
+        physical_count = psutil.cpu_count(logical=False) or logical_count
+        num_cores = physical_count
         cores: list[dict[str, Any]] = []
-        for idx, load in enumerate(per_cpu):
-            cores.append(
-                {
-                    "name": f"Core {idx}",
-                    "threads": [
-                        {"name": f"Thread {idx}", "load_pct": float(load)}
-                    ],
-                }
-            )
+        if physical_count and physical_count < logical_count:
+            base = logical_count // physical_count
+            remainder = logical_count % physical_count
+            start = 0
+            for core_idx in range(physical_count):
+                size = base + (1 if core_idx < remainder else 0)
+                threads = []
+                for logical_idx in range(start, start + size):
+                    threads.append(
+                        {
+                            "name": f"Thread {logical_idx}",
+                            "load_pct": float(per_cpu[logical_idx]),
+                        }
+                    )
+                cores.append({"name": f"Core {core_idx}", "threads": threads})
+                start += size
+        else:
+            for idx, load in enumerate(per_cpu):
+                cores.append(
+                    {
+                        "name": f"Core {idx}",
+                        "threads": [
+                            {"name": f"Thread {idx}", "load_pct": float(load)}
+                        ],
+                    }
+                )
 
         cpu_entry: dict[str, Any] = {
             "name": "CPU",

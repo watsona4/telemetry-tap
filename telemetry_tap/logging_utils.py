@@ -13,7 +13,31 @@ def _trace(self: logging.Logger, message: str, *args: object, **kwargs: object) 
 def configure_logging(level: int) -> None:
     logging.addLevelName(TRACE_LEVEL, "TRACE")
     setattr(logging.Logger, "trace", _trace)
-    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    handlers: list[logging.Handler] = []
+    try:
+        from colorlog import ColoredFormatter  # type: ignore
+
+        formatter = ColoredFormatter(
+            "%(log_color)s%(asctime)s %(levelname)s %(name)s %(message)s",
+            log_colors={
+                "TRACE": "cyan",
+                "DEBUG": "blue",
+                "INFO": "green",
+                "WARNING": "yellow",
+                "ERROR": "red",
+                "CRITICAL": "red,bg_white",
+            },
+        )
+        handler = logging.StreamHandler()
+        handler.setFormatter(formatter)
+        handlers.append(handler)
+    except ImportError:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        )
+        handlers.append(handler)
+    logging.basicConfig(level=level, handlers=handlers)
 
 
 def resolve_log_level(verbosity: int, fallback: str) -> int:

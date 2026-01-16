@@ -35,3 +35,26 @@ include = ["telemetry_tap*"]
 [tool.setuptools]
 package-dir = {"" = "."}
 package-data = {"telemetry_tap" = ["schemas/*.json"]}
+
+[project.optional-dependencies]
+test = [
+  "pytest>=7.4.0",
+  "pytest-mock>=3.11.1",
+  "pytest-cov>=4.1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+  "-v",
+  "--strict-markers",
+  "--tb=short",
+]
+markers = [
+  "windows: tests specific to Windows platform",
+  "linux: tests specific to Linux platform",
+  "integration: integration tests requiring full setup",
+]

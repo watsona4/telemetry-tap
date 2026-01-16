@@ -164,6 +164,18 @@ class MetricsCollector:
         else:
             self.logger.debug("No CPU temperature sensors found.")
 
+        lhm_cpu = self._collect_lhm_cpu()
+        if lhm_cpu:
+            for key in ["temp_c", "voltage_core_v", "voltage_soc_v"]:
+                if key in lhm_cpu and lhm_cpu[key] is not None:
+                    cpu_entry[key] = lhm_cpu[key]
+            core_metrics = lhm_cpu.get("cores", {})
+            for core in cores:
+                index = int(core["name"].split()[-1])
+                lhm_index = index + 1
+                if lhm_index in core_metrics:
+                    core.update(core_metrics[lhm_index])
+
         return [cpu_entry]
 
     def _collect_memory(self) -> dict[str, Any]:
@@ -281,6 +293,7 @@ class MetricsCollector:
     def _collect_ifaces(self) -> list[dict[str, Any]]:
         addrs = psutil.net_if_addrs()
         io_stats = psutil.net_io_counters(pernic=True)
+        iface_stats = psutil.net_if_stats()
         now = datetime.now(timezone.utc).timestamp()
         ifaces: list[dict[str, Any]] = []
 
@@ -323,11 +336,29 @@ class MetricsCollector:
                         entry["rate_down_bps"] = int(
                             (counters.bytes_recv - prev.bytes_recv) / elapsed
                         )
+                else:
+                    entry["rate_up_bps"] = 0
+                    entry["rate_down_bps"] = 0
+
+                speed_mbps = iface_stats.get(iface).speed if iface in iface_stats else 0
+                if speed_mbps:
+                    link_bps = (speed_mbps * 1_000_000) / 8
+                    utilization = (
+                        max(entry["rate_up_bps"], entry["rate_down_bps"]) / link_bps
+                    ) * 100
+                    entry["utilization_pct"] = min(max(utilization, 0.0), 100.0)
 
             ifaces.append(entry)
 
         self.state.last_net = NetSnapshot(timestamp=now, values=io_stats)
         return ifaces
+
+    @staticmethod
+    def _parse_core_index(label: str) -> int | None:
+        for part in label.replace("#", " ").split():
+            if part.isdigit():
+                return int(part)
+        return None
 
     def _collect_batteries(self) -> list[dict[str, Any]]:
         batteries: list[dict[str, Any]] = []
@@ -487,6 +518,10 @@ class MetricsCollector:
         lhm_board = self._collect_lhm_board()
         if lhm_board:
             self._merge_motherboard(motherboard, lhm_board)
+
+        lhm_info = self._collect_lhm_motherboard_info()
+        if lhm_info:
+            motherboard.update(lhm_info)
 
         sensors_board = self._collect_linux_sensors()
         if sensors_board:
@@ -967,6 +1002,18 @@ class MetricsCollector:
             return {}
         return data.get("drives", {})
 
+    def _collect_lhm_cpu(self) -> dict[str, Any] | None:
+        data = self._read_lhm()
+        if not data:
+            return None
+        return data.get("cpu", None)
+
+    def _collect_lhm_motherboard_info(self) -> dict[str, Any] | None:
+        data = self._read_lhm()
+        if not data:
+            return None
+        return data.get("motherboard_info", None)
+
     def _lhm_has_sensor_id(self, raw: dict[str, Any]) -> bool:
         nodes = [raw]
         while nodes:
@@ -980,13 +1027,14 @@ class MetricsCollector:
     def _parse_lhm_tree(self, raw: dict[str, Any]) -> dict[str, Any]:
         battery_map: dict[str, dict[str, Any]] = {}
         drive_map: dict[str, dict[str, Any]] = {}
+        gpu_map: dict[str, dict[str, Any]] = {}
 
         def parse_numeric(value: str | None) -> float | None:
             if value is None:
                 return None
             text = value.replace(",", "").strip()
             text = text.replace("/s", "").strip()
-            for token in ["°C", "V", "A", "W", "%", "mWh", "GB", "MB", "KB"]:
+            for token in ["mWh", "°C", "GB", "MB", "KB", "V", "A", "W", "%"]:
                 if token in text:
                     number = text.replace(token, "").strip()
                     try:
@@ -1017,14 +1065,20 @@ class MetricsCollector:
                 return "motherboard"
             return None
 
+        cpu_entry: dict[str, Any] = {"cores": {}}
+        motherboard_info: dict[str, Any] = {}
+
         def walk(node: dict[str, Any], hw_type: str | None, hw_name: str | None) -> None:
             image_url = node.get("ImageURL") or ""
             node_text = (node.get("Text") or "").replace("\x00", "").strip()
             detected = classify_hardware(image_url)
             next_type = detected or hw_type
             next_name = hw_name
-            if detected in {"battery", "storage"}:
+            if detected in {"battery", "storage", "gpu", "motherboard", "cpu"}:
                 next_name = node_text or hw_name
+
+            if detected == "motherboard" and node_text:
+                motherboard_info.setdefault("name", node_text)
 
             sensor_id = node.get("SensorId")
             sensor_type = (node.get("Type") or "").lower()
@@ -1070,6 +1124,65 @@ class MetricsCollector:
                             drive["total_read_b"] = int(value)
                         elif "data written" in label:
                             drive["total_write_b"] = int(value)
+                if value is not None and next_type == "gpu" and next_name:
+                    gpu = gpu_map.setdefault(next_name, {"engines": []})
+                    label = node_text.lower()
+                    if sensor_type == "temperature":
+                        gpu["temp_c"] = float(value)
+                    elif sensor_type == "load":
+                        gpu["engines"].append(
+                            {"name": node_text, "load": float(value)}
+                        )
+                    elif sensor_type == "voltage":
+                        if "core" in label:
+                            gpu["core_voltage_v"] = float(value)
+                        elif "soc" in label:
+                            gpu["soc_voltage_v"] = float(value)
+                    elif sensor_type == "power":
+                        if "core" in label:
+                            gpu["core_power_w"] = float(value)
+                        elif "soc" in label:
+                            gpu["soc_power_w"] = float(value)
+                    elif sensor_type == "clock":
+                        if "core" in label:
+                            gpu["core_clock_hz"] = float(value) * 1e6
+                        elif "soc" in label:
+                            gpu["soc_clock_hz"] = float(value) * 1e6
+                        elif "memory" in label:
+                            gpu["mem_clock_hz"] = float(value) * 1e6
+                if value is not None and next_type == "cpu":
+                    label = node_text.lower()
+                    if sensor_type == "temperature" and "tctl" in label:
+                        cpu_entry["temp_c"] = float(value)
+                    elif sensor_type == "voltage":
+                        if "core (svi2" in label:
+                            cpu_entry["voltage_core_v"] = float(value)
+                        elif "soc (svi2" in label:
+                            cpu_entry["voltage_soc_v"] = float(value)
+                        elif "vid" in label and "core #" in label:
+                            core_index = self._parse_core_index(label)
+                            if core_index is not None:
+                                cpu_entry["cores"].setdefault(core_index, {})[
+                                    "voltage_v"
+                                ] = float(value)
+                    elif sensor_type == "power" and "core #" in label:
+                        core_index = self._parse_core_index(label)
+                        if core_index is not None:
+                            cpu_entry["cores"].setdefault(core_index, {})[
+                                "power_w"
+                            ] = float(value)
+                    elif sensor_type == "clock" and "core #" in label:
+                        core_index = self._parse_core_index(label)
+                        if core_index is not None:
+                            cpu_entry["cores"].setdefault(core_index, {})[
+                                "clock_hz"
+                            ] = float(value) * 1e6
+                    elif sensor_type == "factor" and "core #" in label:
+                        core_index = self._parse_core_index(label)
+                        if core_index is not None:
+                            cpu_entry["cores"].setdefault(core_index, {})[
+                                "factor"
+                            ] = float(value)
 
             for child in node.get("Children", []):
                 if isinstance(child, dict):
@@ -1107,9 +1220,51 @@ class MetricsCollector:
                     entry[key] = data[key]
             batteries.append(entry)
 
+        parsed_gpus: list[dict[str, Any]] = []
+        for name, gpu_data in gpu_map.items():
+            engines = gpu_data.get("engines", [])
+            core_load = next(
+                (
+                    engine["load"]
+                    for engine in engines
+                    if "core" in engine["name"].lower()
+                ),
+                None,
+            )
+            gpu_entry: dict[str, Any] = {
+                "name": name,
+                "engines": [
+                    {"name": engine["name"], "load": engine["load"]}
+                    for engine in engines
+                ],
+                "core_load": core_load,
+                "temp_c": gpu_data.get("temp_c"),
+            }
+            if gpu_data.get("core_voltage_v") is not None:
+                gpu_entry["core_voltage_v"] = gpu_data["core_voltage_v"]
+            if gpu_data.get("core_power_w") is not None:
+                gpu_entry["core_power_w"] = gpu_data["core_power_w"]
+            if gpu_data.get("core_clock_hz") is not None:
+                gpu_entry["core_clock_hz"] = gpu_data["core_clock_hz"]
+            if gpu_data.get("soc_voltage_v") is not None:
+                gpu_entry["soc_voltage_v"] = gpu_data["soc_voltage_v"]
+            if gpu_data.get("soc_power_w") is not None:
+                gpu_entry["soc_power_w"] = gpu_data["soc_power_w"]
+            if gpu_data.get("soc_clock_hz") is not None:
+                gpu_entry["soc_clock_hz"] = gpu_data["soc_clock_hz"]
+            if gpu_data.get("mem_clock_hz") is not None:
+                gpu_entry["mem_clock_hz"] = gpu_data["mem_clock_hz"]
+            parsed_gpus.append(gpu_entry)
+
+        parsed_cpu = None
+        if cpu_entry.get("temp_c") or cpu_entry.get("voltage_core_v") or cpu_entry["cores"]:
+            parsed_cpu = cpu_entry
+
         return {
             "motherboard_sensors": [],
-            "gpus": [],
+            "gpus": parsed_gpus,
             "batteries": batteries,
             "drives": drive_map,
+            "cpu": parsed_cpu,
+            "motherboard_info": motherboard_info if motherboard_info else None,
         }

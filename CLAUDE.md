@@ -10,7 +10,7 @@ Telemetry Tap is a cross-platform hardware monitoring tool that collects system 
 
 ### Installation and Setup
 ```bash
-# Install the package in editable mode
+# Install the package in editable mode (requires Python >= 3.10)
 pip install -e .
 
 # Copy and edit configuration
@@ -60,6 +60,9 @@ pytest --cov=telemetry_tap --cov-report=term-missing
 
 # Run only Windows-specific tests
 pytest -m windows
+
+# Run only Linux-specific tests
+pytest -m linux
 
 # Run only integration tests
 pytest -m integration

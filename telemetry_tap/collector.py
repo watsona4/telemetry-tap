@@ -165,6 +165,24 @@ class MetricsCollector:
         except Exception:
             self.logger.debug("Failed to collect CPU stats.")
 
+        # Add device model and serial from device-tree (Linux SBCs like Raspberry Pi)
+        if platform.system().lower() == "linux":
+            model = self._read_file("/proc/device-tree/model")
+            if model:
+                host["model"] = model.rstrip("\x00").strip()
+            serial = self._read_file("/sys/firmware/devicetree/base/serial-number")
+            if serial:
+                host["serial"] = serial.rstrip("\x00").strip()
+
+            # Collect Raspberry Pi / SBC specific metrics via vcgencmd
+            throttling = self._collect_vcgencmd_throttling()
+            if throttling:
+                host["throttling"] = throttling
+
+            sbc = self._collect_vcgencmd_sbc()
+            if sbc:
+                host["sbc"] = sbc
+
         return host
 
     def _collect_health(self) -> dict[str, Any]:
@@ -310,17 +328,43 @@ class MetricsCollector:
                 if lhm_index in core_metrics:
                     core.update(core_metrics[lhm_index])
 
+        # Add CPU frequency scaling info (Linux sysfs)
+        if platform.system().lower() == "linux":
+            freq_scaling = self._collect_cpu_freq_scaling()
+            if freq_scaling:
+                cpu_entry.update(freq_scaling)
+
         return [cpu_entry]
 
     def _collect_memory(self) -> dict[str, Any]:
         vm = psutil.virtual_memory()
-        memory: dict[str, Any] = {
-            "system": {
-                "used_b": int(vm.used),
-                "available_b": int(vm.available),
-                "load_pct": float(vm.percent),
-            }
+        system_mem: dict[str, Any] = {
+            "used_b": int(vm.used),
+            "available_b": int(vm.available),
+            "load_pct": float(vm.percent),
+            "total_b": int(vm.total),
         }
+
+        # Add detailed memory breakdown on Linux (from psutil or /proc/meminfo)
+        if platform.system().lower() == "linux":
+            # psutil provides these on Linux
+            if hasattr(vm, "buffers") and vm.buffers:
+                system_mem["buffers_b"] = int(vm.buffers)
+            if hasattr(vm, "cached") and vm.cached:
+                system_mem["cached_b"] = int(vm.cached)
+            if hasattr(vm, "shared") and vm.shared:
+                system_mem["shmem_b"] = int(vm.shared)
+
+            # Get additional details from /proc/meminfo
+            meminfo = self._parse_meminfo()
+            if meminfo:
+                if "Dirty" in meminfo:
+                    system_mem["dirty_b"] = meminfo["Dirty"]
+                if "Slab" in meminfo:
+                    system_mem["slab_b"] = meminfo["Slab"]
+
+        memory: dict[str, Any] = {"system": system_mem}
+
         swap = psutil.swap_memory()
         if swap:
             memory["virtual"] = {
@@ -646,6 +690,17 @@ class MetricsCollector:
                         max(entry["rate_up_bps"], entry["rate_down_bps"]) / link_bps
                     ) * 100
                     entry["utilization_pct"] = min(max(utilization, 0.0), 100.0)
+
+            # Add link details on Linux
+            if platform.system().lower() == "linux":
+                link_details = self._collect_iface_link_details(iface)
+                if link_details:
+                    entry.update(link_details)
+
+                # Add WiFi metrics for wireless interfaces
+                wifi_metrics = self._collect_wifi_metrics(iface)
+                if wifi_metrics:
+                    entry["wifi"] = wifi_metrics
 
             ifaces.append(entry)
 
@@ -2331,6 +2386,287 @@ class MetricsCollector:
         if result.stdout:
             self.logger.log(TRACE_LEVEL, "stdout: %s", result.stdout.strip())
         return result.stdout
+
+    def _read_file(self, path: str) -> str | None:
+        """Read a file and return its contents, or None if it doesn't exist."""
+        try:
+            return Path(path).read_text()
+        except (FileNotFoundError, PermissionError, OSError):
+            return None
+
+    def _collect_vcgencmd_throttling(self) -> dict[str, Any] | None:
+        """Collect Raspberry Pi throttling status from vcgencmd get_throttled."""
+        output = self._run_command(["vcgencmd", "get_throttled"])
+        if not output:
+            return None
+
+        # Parse "throttled=0x50005" format
+        try:
+            hex_str = output.strip().split("=")[1]
+            flags = int(hex_str, 16)
+        except (IndexError, ValueError):
+            self.logger.debug("Failed to parse vcgencmd get_throttled output: %s", output)
+            return None
+
+        # Decode the bitmask
+        # Bit meanings:
+        # 0: Under-voltage detected
+        # 1: Arm frequency capped
+        # 2: Currently throttled
+        # 3: Soft temperature limit active
+        # 16: Under-voltage has occurred
+        # 17: Arm frequency capped has occurred
+        # 18: Throttling has occurred
+        # 19: Soft temperature limit has occurred
+        return {
+            "raw": hex_str,
+            "undervoltage": bool(flags & (1 << 0)),
+            "freq_capped": bool(flags & (1 << 1)),
+            "throttled": bool(flags & (1 << 2)),
+            "soft_temp_limit": bool(flags & (1 << 3)),
+            "undervoltage_occurred": bool(flags & (1 << 16)),
+            "freq_capped_occurred": bool(flags & (1 << 17)),
+            "throttled_occurred": bool(flags & (1 << 18)),
+            "soft_temp_limit_occurred": bool(flags & (1 << 19)),
+        }
+
+    def _collect_vcgencmd_sbc(self) -> dict[str, Any] | None:
+        """Collect Raspberry Pi SBC metrics from vcgencmd (memory split, clocks, voltages)."""
+        sbc: dict[str, Any] = {}
+
+        # Memory split (arm/gpu)
+        arm_mem = self._run_command(["vcgencmd", "get_mem", "arm"])
+        gpu_mem = self._run_command(["vcgencmd", "get_mem", "gpu"])
+        if arm_mem:
+            try:
+                # Parse "arm=948M" format
+                value = arm_mem.strip().split("=")[1]
+                if value.endswith("M"):
+                    sbc["arm_mem_b"] = int(value[:-1]) * 1024 * 1024
+                elif value.endswith("G"):
+                    sbc["arm_mem_b"] = int(float(value[:-1]) * 1024 * 1024 * 1024)
+            except (IndexError, ValueError):
+                pass
+        if gpu_mem:
+            try:
+                value = gpu_mem.strip().split("=")[1]
+                if value.endswith("M"):
+                    sbc["gpu_mem_b"] = int(value[:-1]) * 1024 * 1024
+                elif value.endswith("G"):
+                    sbc["gpu_mem_b"] = int(float(value[:-1]) * 1024 * 1024 * 1024)
+            except (IndexError, ValueError):
+                pass
+
+        # Clock frequencies
+        clocks: dict[str, int] = {}
+        clock_names = [("arm", "arm_hz"), ("core", "core_hz"), ("h264", "h264_hz"),
+                       ("v3d", "v3d_hz"), ("emmc", "emmc_hz")]
+        for vcg_name, schema_name in clock_names:
+            output = self._run_command(["vcgencmd", "measure_clock", vcg_name])
+            if output:
+                try:
+                    # Parse "frequency(48)=1800000000" format
+                    freq_str = output.strip().split("=")[1]
+                    clocks[schema_name] = int(freq_str)
+                except (IndexError, ValueError):
+                    pass
+        if clocks:
+            sbc["clocks"] = clocks
+
+        # Voltages
+        voltages: dict[str, float] = {}
+        voltage_names = [("core", "core_v"), ("sdram_c", "sdram_c_v"),
+                         ("sdram_i", "sdram_i_v"), ("sdram_p", "sdram_p_v")]
+        for vcg_name, schema_name in voltage_names:
+            output = self._run_command(["vcgencmd", "measure_volts", vcg_name])
+            if output:
+                try:
+                    # Parse "volt=0.9460V" format
+                    volt_str = output.strip().split("=")[1]
+                    if volt_str.endswith("V"):
+                        voltages[schema_name] = float(volt_str[:-1])
+                except (IndexError, ValueError):
+                    pass
+        if voltages:
+            sbc["voltages"] = voltages
+
+        return sbc if sbc else None
+
+    def _collect_cpu_freq_scaling(self) -> dict[str, Any] | None:
+        """Collect CPU frequency scaling info from Linux sysfs."""
+        result: dict[str, Any] = {}
+        cpu0_path = "/sys/devices/system/cpu/cpu0/cpufreq"
+
+        # Governor
+        governor = self._read_file(f"{cpu0_path}/scaling_governor")
+        if governor:
+            result["governor"] = governor.strip()
+
+        # Min/max frequencies (in kHz in sysfs, convert to Hz)
+        min_freq = self._read_file(f"{cpu0_path}/scaling_min_freq")
+        if min_freq:
+            try:
+                result["freq_min_hz"] = int(min_freq.strip()) * 1000
+            except ValueError:
+                pass
+
+        max_freq = self._read_file(f"{cpu0_path}/scaling_max_freq")
+        if max_freq:
+            try:
+                result["freq_max_hz"] = int(max_freq.strip()) * 1000
+            except ValueError:
+                pass
+
+        return result if result else None
+
+    def _parse_meminfo(self) -> dict[str, int] | None:
+        """Parse /proc/meminfo and return values in bytes."""
+        content = self._read_file("/proc/meminfo")
+        if not content:
+            return None
+
+        result: dict[str, int] = {}
+        for line in content.splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                key = parts[0].rstrip(":")
+                try:
+                    # Values are in kB
+                    value_kb = int(parts[1])
+                    result[key] = value_kb * 1024
+                except ValueError:
+                    pass
+        return result
+
+    def _collect_iface_link_details(self, iface: str) -> dict[str, Any] | None:
+        """Collect network interface link details from Linux sysfs."""
+        result: dict[str, Any] = {}
+        sysfs_path = f"/sys/class/net/{iface}"
+
+        # Link speed (Mbps)
+        speed = self._read_file(f"{sysfs_path}/speed")
+        if speed:
+            try:
+                speed_val = int(speed.strip())
+                if speed_val > 0:  # -1 means unknown
+                    result["link_speed_mbps"] = speed_val
+            except ValueError:
+                pass
+
+        # Duplex mode
+        duplex = self._read_file(f"{sysfs_path}/duplex")
+        if duplex:
+            duplex_val = duplex.strip().lower()
+            if duplex_val in ("full", "half"):
+                result["duplex"] = duplex_val
+            elif duplex_val:
+                result["duplex"] = "unknown"
+
+        # MTU
+        mtu = self._read_file(f"{sysfs_path}/mtu")
+        if mtu:
+            try:
+                result["mtu"] = int(mtu.strip())
+            except ValueError:
+                pass
+
+        # Carrier (link up/down)
+        carrier = self._read_file(f"{sysfs_path}/carrier")
+        if carrier:
+            try:
+                result["carrier"] = bool(int(carrier.strip()))
+            except ValueError:
+                pass
+
+        return result if result else None
+
+    def _collect_wifi_metrics(self, iface: str) -> dict[str, Any] | None:
+        """Collect WiFi metrics for a wireless interface using iwconfig."""
+        # First check if this is a wireless interface
+        wireless_path = f"/sys/class/net/{iface}/wireless"
+        if not Path(wireless_path).exists():
+            return None
+
+        result: dict[str, Any] = {}
+
+        # Try iwconfig for detailed WiFi info
+        output = self._run_command(["iwconfig", iface])
+        if output:
+            lines = output.replace("\n          ", " ").split("\n")
+            for line in lines:
+                # ESSID
+                if "ESSID:" in line:
+                    try:
+                        essid = line.split('ESSID:"')[1].split('"')[0]
+                        if essid and essid != "off/any":
+                            result["essid"] = essid
+                    except (IndexError, ValueError):
+                        pass
+
+                # Access Point
+                if "Access Point:" in line:
+                    try:
+                        ap = line.split("Access Point:")[1].strip().split()[0]
+                        if ap and ap != "Not-Associated":
+                            result["access_point"] = ap
+                    except (IndexError, ValueError):
+                        pass
+
+                # Mode
+                if "Mode:" in line:
+                    try:
+                        mode = line.split("Mode:")[1].strip().split()[0]
+                        result["mode"] = mode
+                    except (IndexError, ValueError):
+                        pass
+
+                # Frequency
+                if "Frequency:" in line:
+                    try:
+                        freq_str = line.split("Frequency:")[1].strip().split()[0]
+                        # Convert GHz to MHz
+                        if "GHz" in line:
+                            result["frequency_mhz"] = float(freq_str) * 1000
+                        else:
+                            result["frequency_mhz"] = float(freq_str)
+                    except (IndexError, ValueError):
+                        pass
+
+                # TX Power
+                if "Tx-Power=" in line:
+                    try:
+                        tx_str = line.split("Tx-Power=")[1].strip().split()[0]
+                        result["tx_power_dbm"] = int(tx_str)
+                    except (IndexError, ValueError):
+                        pass
+
+                # Bit Rate
+                if "Bit Rate=" in line:
+                    try:
+                        rate_str = line.split("Bit Rate=")[1].strip().split()[0]
+                        result["bitrate_mbps"] = float(rate_str)
+                    except (IndexError, ValueError):
+                        pass
+
+                # Signal level
+                if "Signal level=" in line:
+                    try:
+                        sig_str = line.split("Signal level=")[1].strip().split()[0]
+                        result["signal_dbm"] = int(sig_str)
+                    except (IndexError, ValueError):
+                        pass
+
+                # Link Quality
+                if "Link Quality=" in line:
+                    try:
+                        qual_str = line.split("Link Quality=")[1].strip().split()[0]
+                        if "/" in qual_str:
+                            num, denom = qual_str.split("/")
+                            result["signal_pct"] = (int(num) / int(denom)) * 100
+                    except (IndexError, ValueError):
+                        pass
+
+        return result if result else None
 
     def _parse_lhm(self, raw: dict[str, Any]) -> dict[str, Any]:
         if self._lhm_has_sensor_id(raw):

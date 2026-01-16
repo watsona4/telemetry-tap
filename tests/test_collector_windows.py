@@ -89,6 +89,7 @@ class TestWindowsCollector:
             used=8589934592,  # 8GB
             available=8589934592,  # 8GB
             percent=50.0,
+            total=17179869184,  # 16GB
         )
 
         memory = collector._collect_memory()
@@ -149,7 +150,7 @@ class TestWindowsCollector:
 
         with patch("psutil.cpu_percent", side_effect=cpu_percent_side_effect), \
              patch("psutil.cpu_count", return_value=4), \
-             patch("psutil.virtual_memory", return_value=Mock(used=1000, available=1000, percent=50.0)), \
+             patch("psutil.virtual_memory", return_value=Mock(used=1000, available=1000, percent=50.0, total=2000)), \
              patch("psutil.swap_memory", return_value=Mock(used=0, free=1000, percent=0.0)), \
              patch("psutil.boot_time", return_value=1000000), \
              patch("psutil.disk_partitions", return_value=[]), \

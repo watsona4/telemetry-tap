@@ -84,6 +84,133 @@
           "type": "integer",
           "minimum": 0,
           "description": "Total hardware interrupts since boot (cumulative counter)."
+        },
+        "model": {
+          "type": "string",
+          "description": "Device model string from firmware/device-tree (for example: 'Raspberry Pi 4 Model B Rev 1.5')."
+        },
+        "serial": {
+          "type": "string",
+          "description": "Device serial number from firmware/device-tree, if available."
+        },
+        "throttling": {
+          "type": "object",
+          "description": "SBC/embedded throttling status from vcgencmd or equivalent (Raspberry Pi, etc.).",
+          "additionalProperties": false,
+          "properties": {
+            "raw": {
+              "type": "string",
+              "description": "Raw throttling flags as hex string (for example: '0x50005')."
+            },
+            "undervoltage": {
+              "type": "boolean",
+              "description": "Currently experiencing undervoltage."
+            },
+            "freq_capped": {
+              "type": "boolean",
+              "description": "ARM frequency currently capped."
+            },
+            "throttled": {
+              "type": "boolean",
+              "description": "Currently throttled due to temperature or other limits."
+            },
+            "soft_temp_limit": {
+              "type": "boolean",
+              "description": "Soft temperature limit currently active."
+            },
+            "undervoltage_occurred": {
+              "type": "boolean",
+              "description": "Undervoltage has occurred since last boot."
+            },
+            "freq_capped_occurred": {
+              "type": "boolean",
+              "description": "Frequency capping has occurred since last boot."
+            },
+            "throttled_occurred": {
+              "type": "boolean",
+              "description": "Throttling has occurred since last boot."
+            },
+            "soft_temp_limit_occurred": {
+              "type": "boolean",
+              "description": "Soft temperature limit has been reached since last boot."
+            }
+          }
+        },
+        "sbc": {
+          "type": "object",
+          "description": "Single-board computer specific metrics (Raspberry Pi, etc.) from vcgencmd or equivalent.",
+          "additionalProperties": false,
+          "properties": {
+            "arm_mem_b": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Memory allocated to ARM CPU in bytes."
+            },
+            "gpu_mem_b": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Memory allocated to GPU in bytes."
+            },
+            "clocks": {
+              "type": "object",
+              "description": "Clock frequencies for various SoC components.",
+              "additionalProperties": false,
+              "properties": {
+                "arm_hz": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "ARM CPU clock frequency in Hz."
+                },
+                "core_hz": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "GPU core clock frequency in Hz."
+                },
+                "h264_hz": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "H264 decoder clock frequency in Hz."
+                },
+                "v3d_hz": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "V3D (3D graphics) clock frequency in Hz."
+                },
+                "emmc_hz": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "eMMC/SD clock frequency in Hz."
+                }
+              }
+            },
+            "voltages": {
+              "type": "object",
+              "description": "Voltage readings for various SoC rails.",
+              "additionalProperties": false,
+              "properties": {
+                "core_v": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Core voltage in volts."
+                },
+                "sdram_c_v": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "SDRAM controller voltage in volts."
+                },
+                "sdram_i_v": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "SDRAM I/O voltage in volts."
+                },
+                "sdram_p_v": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "SDRAM physical voltage in volts."
+                }
+              }
+            }
+          }
         }
       },
       "required": [
@@ -234,7 +361,8 @@
                   "paused",
                   "dead",
                   "starting",
-                  "healthy"
+                  "healthy",
+                  "unknown"
                 ],
                 "type": "string",
                 "description": "Container status string."
@@ -750,7 +878,21 @@
           },
           "name": {
             "type": "string",
-            "description": "Collector-provided CPU identifier (for example: “CPU”, “Package 0”, “AMD Ryzen …”)."
+            "description": "Collector-provided CPU identifier (for example: 'CPU', 'Package 0', 'AMD Ryzen ...')."
+          },
+          "governor": {
+            "type": "string",
+            "description": "CPU frequency scaling governor (for example: 'ondemand', 'performance', 'powersave', 'schedutil')."
+          },
+          "freq_min_hz": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Minimum CPU frequency limit in Hz from frequency scaling policy."
+          },
+          "freq_max_hz": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Maximum CPU frequency limit in Hz from frequency scaling policy."
           }
         },
         "required": [
@@ -787,6 +929,36 @@
               "type": "integer",
               "minimum": 0,
               "description": "Bytes of physical memory currently available."
+            },
+            "total_b": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Total physical memory in bytes."
+            },
+            "buffers_b": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Memory used for kernel buffers in bytes (Linux)."
+            },
+            "cached_b": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Memory used for page cache in bytes (Linux)."
+            },
+            "dirty_b": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Memory waiting to be written back to disk in bytes (Linux)."
+            },
+            "shmem_b": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Shared memory in bytes (Linux)."
+            },
+            "slab_b": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Kernel slab allocator memory in bytes (Linux)."
             }
           },
           "required": [
@@ -1587,7 +1759,73 @@
           "data_up_b": {
             "type": "integer",
             "minimum": 0,
-            "description": "Total bytes transmitted since boot or since the collector’s reference point, if available."
+            "description": "Total bytes transmitted since boot or since the collector's reference point, if available."
+          },
+          "link_speed_mbps": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Link speed in megabits per second (for example: 100, 1000, 10000), if available."
+          },
+          "duplex": {
+            "type": "string",
+            "enum": ["full", "half", "unknown"],
+            "description": "Link duplex mode, if available."
+          },
+          "mtu": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Maximum transmission unit in bytes."
+          },
+          "carrier": {
+            "type": "boolean",
+            "description": "True if the link has carrier (cable connected and link established)."
+          },
+          "wifi": {
+            "type": "object",
+            "description": "WiFi-specific metrics for wireless interfaces.",
+            "additionalProperties": false,
+            "properties": {
+              "essid": {
+                "type": "string",
+                "description": "Connected network ESSID/SSID, if associated."
+              },
+              "access_point": {
+                "type": "string",
+                "description": "MAC address of the connected access point, if associated."
+              },
+              "signal_dbm": {
+                "type": "number",
+                "description": "Signal strength in dBm (typically negative, for example: -45)."
+              },
+              "signal_pct": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Signal quality as a percentage (0-100), if available."
+              },
+              "noise_dbm": {
+                "type": "number",
+                "description": "Noise level in dBm, if available."
+              },
+              "tx_power_dbm": {
+                "type": "number",
+                "description": "Transmit power in dBm."
+              },
+              "frequency_mhz": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Operating frequency in MHz (for example: 2437 for channel 6)."
+              },
+              "bitrate_mbps": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Current link bitrate in Mbps."
+              },
+              "mode": {
+                "type": "string",
+                "description": "WiFi mode (for example: 'Managed', 'Ad-Hoc', 'Master', 'Monitor')."
+              }
+            }
           }
         },
         "required": [

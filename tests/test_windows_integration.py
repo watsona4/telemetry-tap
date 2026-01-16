@@ -77,6 +77,7 @@ def mock_windows_system():
             used=8589934592,
             available=8589934592,
             percent=50.0,
+            total=17179869184,
         )
         mock_swap.return_value = Mock(
             used=0,

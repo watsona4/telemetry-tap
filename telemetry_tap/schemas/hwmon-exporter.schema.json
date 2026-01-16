@@ -1560,7 +1560,6 @@
         },
         "required": [
           "name",
-          "mac",
           "ipv4",
           "ipv6"
         ]

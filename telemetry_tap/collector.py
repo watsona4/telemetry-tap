@@ -347,16 +347,16 @@ class MetricsCollector:
                     mac = addr.address
                 elif getattr(psutil, "AF_LINK", None) == addr.family:
                     mac = addr.address
-            if mac is None:
-                self.logger.debug("Skipping interface %s without MAC.", iface)
-                continue
 
             entry: dict[str, Any] = {
                 "name": iface,
-                "mac": mac,
                 "ipv4": ipv4,
                 "ipv6": ipv6,
             }
+
+            # Include MAC address only if available
+            if mac is not None:
+                entry["mac"] = mac
 
             if iface in io_stats:
                 counters = io_stats[iface]

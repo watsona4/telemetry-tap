@@ -20,12 +20,12 @@ def configure_logging(level: int) -> None:
         formatter = ColoredFormatter(
             "%(log_color)s%(asctime)s %(levelname)s %(name)s %(message)s",
             log_colors={
-                "TRACE": "cyan",
-                "DEBUG": "blue",
-                "INFO": "green",
-                "WARNING": "yellow",
-                "ERROR": "red",
-                "CRITICAL": "red,bg_white",
+                "TRACE": "light_cyan",
+                "DEBUG": "light_blue",
+                "INFO": "light_green",
+                "WARNING": "light_yellow",
+                "ERROR": "light_red",
+                "CRITICAL": "bold_light_red",
             },
         )
         handler = logging.StreamHandler()

@@ -116,8 +116,28 @@ class MetricsCollector:
             payload["motherboard"] = motherboard
 
         gpus = self._collect_lhm_gpus()
+        # Add Intel iGPU if available and not already in gpus
+        intel_gpu = self._collect_intel_gpu()
+        if intel_gpu:
+            if not gpus:
+                gpus = []
+            # Check if Intel GPU already reported via LHM
+            intel_names = {"Intel", "UHD", "Iris", "HD Graphics"}
+            has_intel = any(
+                any(n in g.get("name", "") for n in intel_names) for g in gpus
+            )
+            if not has_intel:
+                gpus.append(intel_gpu)
         if gpus:
             payload["gpus"] = gpus
+
+        tpus = self._collect_tpus()
+        if tpus:
+            payload["tpus"] = tpus
+
+        backup_providers = self._collect_backup_providers()
+        if backup_providers:
+            payload["backup_providers"] = backup_providers
 
         self.logger.debug("Completed metrics payload collection.")
         return payload
@@ -125,7 +145,7 @@ class MetricsCollector:
     def _collect_host(self, ts: str) -> dict[str, Any]:
         boot = datetime.fromtimestamp(psutil.boot_time(), tz=timezone.utc)
         uptime_s = int(datetime.now(timezone.utc).timestamp() - boot.timestamp())
-        return {
+        host: dict[str, Any] = {
             "name": socket.gethostname(),
             "system": platform.system(),
             "os": platform.platform(),
@@ -134,7 +154,18 @@ class MetricsCollector:
             "python": platform.python_version(),
             "boot_time": boot.isoformat(),
             "uptime_s": uptime_s,
+            "process_count": len(psutil.pids()),
         }
+
+        # Add system stats (context switches, interrupts) if available
+        try:
+            cpu_stats = psutil.cpu_stats()
+            host["context_switches"] = cpu_stats.ctx_switches
+            host["interrupts"] = cpu_stats.interrupts
+        except Exception:
+            self.logger.debug("Failed to collect CPU stats.")
+
+        return host
 
     def _collect_health(self) -> dict[str, Any]:
         issues: list[str] = []
@@ -239,6 +270,23 @@ class MetricsCollector:
                     }
                 )
 
+        # Add CPU frequency data per-core
+        try:
+            freq_per_cpu = psutil.cpu_freq(percpu=True)
+            if freq_per_cpu and len(freq_per_cpu) == len(cores):
+                for i, freq in enumerate(freq_per_cpu):
+                    if freq and freq.current:
+                        # Convert MHz to Hz
+                        cores[i]["clock_hz"] = int(freq.current * 1_000_000)
+            elif freq_per_cpu:
+                # Fallback: single frequency for all cores
+                freq = freq_per_cpu[0] if freq_per_cpu else psutil.cpu_freq()
+                if freq and freq.current:
+                    for core in cores:
+                        core["clock_hz"] = int(freq.current * 1_000_000)
+        except Exception:
+            self.logger.debug("Failed to collect CPU frequency data.")
+
         temps = None
         if hasattr(psutil, "sensors_temperatures"):
             temps = psutil.sensors_temperatures(fahrenheit=False)
@@ -286,6 +334,7 @@ class MetricsCollector:
         filesystems: list[dict[str, Any]] = []
         drive_metadata = self.state.drive_cache or self._drive_metadata()
         is_windows = platform.system().lower() == "windows"
+        is_linux = platform.system().lower() == "linux"
 
         # Build partition-to-drive mapping
         partition_map: dict[str, str] = {}
@@ -294,6 +343,11 @@ class MetricsCollector:
                 partition_name = partition.get("name")
                 if partition_name:
                     partition_map[partition_name] = drive_name
+
+        # On Linux, build device-to-label/uuid mapping from lsblk
+        device_metadata: dict[str, dict[str, Any]] = {}
+        if is_linux:
+            device_metadata = self._collect_device_metadata_lsblk()
 
         # Windows-specific: map drive letters to physical disk numbers
         windows_partition_map: dict[str, int] = {}
@@ -312,6 +366,29 @@ class MetricsCollector:
                 # Single drive case - map disk 0 to the LHM data
                 lhm_by_disk[0] = next(iter(lhm_drives.values()))
             # TODO: Multi-drive matching could be enhanced
+
+        # Get psutil disk I/O counters for computing rates on Linux
+        io_stats = psutil.disk_io_counters(perdisk=True)
+        now = datetime.now(timezone.utc).timestamp()
+        drive_io_rates: dict[str, dict[str, Any]] = {}
+        if is_linux and self.state.last_disk:
+            elapsed = now - self.state.last_disk.timestamp
+            if elapsed > 0:
+                for disk_name, io_entry in io_stats.items():
+                    if disk_name in self.state.last_disk.values:
+                        prev = self.state.last_disk.values[disk_name]
+                        drive_io_rates[disk_name] = {
+                            "read_rate_bps": int((io_entry.read_bytes - prev.read_bytes) / elapsed),
+                            "write_rate_bps": int((io_entry.write_bytes - prev.write_bytes) / elapsed),
+                        }
+                        # Calculate activity from busy_time
+                        if hasattr(io_entry, "busy_time") and hasattr(prev, "busy_time"):
+                            busy_delta_ms = io_entry.busy_time - prev.busy_time
+                            elapsed_ms = elapsed * 1000
+                            if elapsed_ms > 0:
+                                activity_pct = min(100.0, (busy_delta_ms / elapsed_ms) * 100)
+                                drive_io_rates[disk_name]["read_activity_pct"] = round(activity_pct, 1)
+                                drive_io_rates[disk_name]["write_activity_pct"] = round(activity_pct, 1)
 
         # Collect partitions first
         partitions = psutil.disk_partitions(all=False)
@@ -359,22 +436,25 @@ class MetricsCollector:
                         "drive_name": drive_name,
                     }
 
-            # Add LHM metrics if available
-            lhm_match = None
+            # Add I/O metrics - prefer LHM, fall back to psutil-computed rates
+            io_source = None
             if drive_name and drive_name in lhm_drives:
-                lhm_match = lhm_drives[drive_name]
+                io_source = lhm_drives[drive_name]
             elif disk_number is not None and disk_number in lhm_by_disk:
-                lhm_match = lhm_by_disk[disk_number]
+                io_source = lhm_by_disk[disk_number]
+            elif drive_name and drive_name in drive_io_rates:
+                # Fall back to psutil-computed rates on Linux
+                io_source = drive_io_rates[drive_name]
 
-            if lhm_match:
-                if "read_rate_bps" in lhm_match:
-                    entry["read_rate_bps"] = lhm_match["read_rate_bps"]
-                if "write_rate_bps" in lhm_match:
-                    entry["write_rate_bps"] = lhm_match["write_rate_bps"]
-                if "read_activity_pct" in lhm_match:
-                    entry["read_activity_pct"] = lhm_match["read_activity_pct"]
-                if "write_activity_pct" in lhm_match:
-                    entry["write_activity_pct"] = lhm_match["write_activity_pct"]
+            if io_source:
+                if "read_rate_bps" in io_source:
+                    entry["read_rate_bps"] = io_source["read_rate_bps"]
+                if "write_rate_bps" in io_source:
+                    entry["write_rate_bps"] = io_source["write_rate_bps"]
+                if "read_activity_pct" in io_source:
+                    entry["read_activity_pct"] = io_source["read_activity_pct"]
+                if "write_activity_pct" in io_source:
+                    entry["write_activity_pct"] = io_source["write_activity_pct"]
 
             # Add encryption info if available
             if part.mountpoint in bitlocker_status:
@@ -390,6 +470,14 @@ class MetricsCollector:
                 # Update fstype if available from Get-Volume (more reliable on Windows)
                 if "fstype" in vol_meta:
                     entry["format"] = vol_meta["fstype"]
+
+            # Add label/uuid from lsblk on Linux
+            if is_linux and part.device in device_metadata:
+                dev_meta = device_metadata[part.device]
+                if "label" in dev_meta and dev_meta["label"]:
+                    entry["label"] = dev_meta["label"]
+                if "uuid" in dev_meta and dev_meta["uuid"]:
+                    entry["uuid"] = dev_meta["uuid"]
 
             filesystems.append(entry)
         return filesystems
@@ -426,8 +514,8 @@ class MetricsCollector:
             entry: dict[str, Any] = {
                 "name": name,
                 "type": meta.get("type", "unknown"),
-                "manufacturer": meta.get("manufacturer", "unknown"),
-                "model": meta.get("model", "unknown"),
+                "manufacturer": (meta.get("manufacturer") or "unknown").strip(),
+                "model": (meta.get("model") or "unknown").strip(),
                 "used_b": meta.get("used_b", 0),
                 "available_b": meta.get("available_b", 0),
                 "total_read_b": int(io_entry.read_bytes),
@@ -453,6 +541,14 @@ class MetricsCollector:
                     entry["write_rate_bps"] = int(
                         (io_entry.write_bytes - prev.write_bytes) / elapsed
                     )
+                    # Calculate activity percentage from busy_time (ms)
+                    if hasattr(io_entry, "busy_time") and hasattr(prev, "busy_time"):
+                        busy_delta_ms = io_entry.busy_time - prev.busy_time
+                        elapsed_ms = elapsed * 1000
+                        if elapsed_ms > 0:
+                            activity_pct = min(100.0, (busy_delta_ms / elapsed_ms) * 100)
+                            entry["read_activity_pct"] = round(activity_pct, 1)
+                            entry["write_activity_pct"] = round(activity_pct, 1)
 
             smart = meta.get("smart")
             if smart:
@@ -481,6 +577,12 @@ class MetricsCollector:
                 ]:
                     if key in lhm_match and lhm_match[key] is not None:
                         entry[key] = lhm_match[key]
+
+            # Get drive temp from Linux sensors if not already set
+            if "temp_c" not in entry and platform.system().lower() == "linux":
+                drive_temp = self._get_drive_temp_from_sensors(name)
+                if drive_temp is not None:
+                    entry["temp_c"] = drive_temp
 
             drives.append(entry)
 
@@ -562,6 +664,9 @@ class MetricsCollector:
         if swap and swap.percent > 90:
             issues.append(f"High swap utilization {swap.percent:.1f}%")
         for part in psutil.disk_partitions(all=False):
+            # Skip read-only squashfs mounts (snap packages) - they're always 100% used
+            if part.fstype == "squashfs":
+                continue
             try:
                 usage = psutil.disk_usage(part.mountpoint)
             except OSError:
@@ -583,7 +688,7 @@ class MetricsCollector:
         for service in self.health.services:
             output = self._run_command(
                 [
-                    "systemctl",
+                    self.config.systemctl_path,
                     "show",
                     service,
                     "--no-page",
@@ -611,15 +716,15 @@ class MetricsCollector:
             loaded = fields.get("LoadState", "unknown")
             status = active if active in {"active", "inactive", "failed"} else sub
             ok = active == "active"
-            services.append(
-                {
-                    "name": service,
-                    "ok": ok,
-                    "status": status,
-                    "loaded": loaded,
-                    "detail": None if ok else f"{active}/{sub}",
-                }
-            )
+            entry: dict[str, Any] = {
+                "name": service,
+                "ok": ok,
+                "status": status,
+                "loaded": loaded,
+            }
+            if not ok:
+                entry["detail"] = f"{active}/{sub}"
+            services.append(entry)
         return services
 
     def _collect_services_windows(self) -> list[dict[str, Any]]:
@@ -697,7 +802,36 @@ class MetricsCollector:
         """Collect pending software updates."""
         if platform.system().lower() == "windows":
             return self._collect_updates_windows()
-        # Linux update checking could be added here (apt, dnf, etc.)
+        elif platform.system().lower() == "linux":
+            return self._collect_updates_linux()
+        return None
+
+    def _collect_updates_linux(self) -> dict[str, Any] | None:
+        """Collect pending Linux updates using apt or dnf."""
+        # Try apt list --upgradable (Debian/Ubuntu)
+        output = self._run_command(
+            [self.config.apt_path, "list", "--upgradable"], stderr=subprocess.DEVNULL
+        )
+        if output is not None:
+            lines = [l for l in output.strip().split("\n") if l and not l.startswith("Listing")]
+            if lines:
+                return {
+                    "pending": len(lines),
+                    "source": "apt",
+                }
+            return {"pending": 0, "source": "apt"}
+
+        # Try dnf check-update (Fedora/RHEL)
+        output = self._run_command(
+            [self.config.dnf_path, "check-update", "-q"], stderr=subprocess.DEVNULL
+        )
+        if output is not None:
+            lines = [l for l in output.strip().split("\n") if l and not l.startswith(" ")]
+            return {
+                "pending": len(lines),
+                "source": "dnf",
+            }
+
         return None
 
     def _collect_updates_windows(self) -> dict[str, Any] | None:
@@ -873,7 +1007,7 @@ class MetricsCollector:
         if platform.system().lower() != "linux":
             self.logger.debug("Skipping lsblk drive metadata on non-Linux.")
             return {}
-        output = self._run_command([self.config.lsblk_path, "-J", "-O"])
+        output = self._run_command([self.config.lsblk_path, "-J", "-b", "-O"])
         if output is None:
             self.logger.debug("lsblk command failed or missing.")
             return {}
@@ -893,15 +1027,49 @@ class MetricsCollector:
             drive_type = "HDD" if block.get("rota") else "SSD"
             partitions = self._parse_lsblk_partitions(block.get("children", []))
             metadata[name] = {
-                "manufacturer": block.get("vendor") or "unknown",
-                "model": block.get("model") or "unknown",
+                "manufacturer": (block.get("vendor") or "unknown").strip(),
+                "model": (block.get("model") or "unknown").strip(),
                 "type": drive_type,
                 "listed_cap_b": block.get("size")
                 if isinstance(block.get("size"), int)
                 else None,
+                "serial": (block.get("serial") or "").strip() or None,
+                "firmware": (block.get("rev") or "").strip() or None,
                 "partitions": partitions,
             }
         return metadata
+
+    def _collect_device_metadata_lsblk(self) -> dict[str, dict[str, Any]]:
+        """Collect device label/uuid metadata from lsblk for filesystems."""
+        if platform.system().lower() != "linux":
+            return {}
+        output = self._run_command([self.config.lsblk_path, "-J", "-b", "-o", "NAME,PATH,LABEL,UUID,FSTYPE"])
+        if output is None:
+            return {}
+        try:
+            data = json.loads(output)
+        except json.JSONDecodeError:
+            return {}
+
+        device_meta: dict[str, dict[str, Any]] = {}
+
+        def traverse(devices: list[dict[str, Any]]) -> None:
+            for dev in devices:
+                path = dev.get("path")
+                if path:
+                    meta: dict[str, Any] = {}
+                    if dev.get("label"):
+                        meta["label"] = dev["label"]
+                    if dev.get("uuid"):
+                        meta["uuid"] = dev["uuid"]
+                    if meta:
+                        device_meta[path] = meta
+                # Recurse into children (partitions, LVM, crypt, etc.)
+                if "children" in dev:
+                    traverse(dev["children"])
+
+        traverse(data.get("blockdevices", []))
+        return device_meta
 
     def _drive_metadata_windows(self) -> dict[str, dict[str, Any]]:
         """Create drive metadata on Windows from WMI and PowerShell."""
@@ -1262,46 +1430,83 @@ class MetricsCollector:
         if not metadata:
             return
 
-        partitions = psutil.disk_partitions(all=False)
-
-        # On Linux, match partitions to drives by device name
+        # On Linux, use lsblk hierarchy to find all filesystems under each drive
         if platform.system().lower() == "linux":
-            for part in partitions:
-                device = Path(part.device).name
-                if device not in metadata:
-                    continue
-                try:
-                    usage = psutil.disk_usage(part.mountpoint)
-                except OSError:
-                    self.logger.debug("Skipping usage for %s (unreadable).", part.mountpoint)
-                    continue
-                metadata[device]["used_b"] = int(usage.used)
-                metadata[device]["available_b"] = int(usage.free)
-
+            self._populate_usage_linux(metadata)
         # On Windows, sum all partition usage for all drives
         elif platform.system().lower() == "windows":
+            self._populate_usage_windows(metadata)
+
+    def _populate_usage_linux(self, metadata: dict[str, dict[str, Any]]) -> None:
+        """Populate drive usage by aggregating all filesystems under each drive."""
+        output = self._run_command(
+            [self.config.lsblk_path, "-J", "-b", "-o", "NAME,TYPE,MOUNTPOINT,SIZE"]
+        )
+        if output is None:
+            return
+        try:
+            data = json.loads(output)
+        except json.JSONDecodeError:
+            return
+
+        def collect_mountpoints(device: dict[str, Any]) -> list[str]:
+            """Recursively collect all mountpoints under a device."""
+            mountpoints: list[str] = []
+            mp = device.get("mountpoint")
+            if mp:
+                mountpoints.append(mp)
+            for child in device.get("children", []):
+                mountpoints.extend(collect_mountpoints(child))
+            return mountpoints
+
+        for block in data.get("blockdevices", []):
+            if block.get("type") != "disk":
+                continue
+            name = block.get("name")
+            if not name or name not in metadata:
+                continue
+
+            # Find all mountpoints under this drive
+            mountpoints = collect_mountpoints(block)
             total_used = 0
             total_free = 0
 
-            for part in partitions:
+            for mp in mountpoints:
                 try:
-                    usage = psutil.disk_usage(part.mountpoint)
+                    usage = psutil.disk_usage(mp)
                     total_used += int(usage.used)
                     total_free += int(usage.free)
                 except OSError:
-                    self.logger.debug("Skipping usage for %s (unreadable).", part.mountpoint)
                     continue
 
-            # Distribute total usage across all drives
-            # This is an approximation since we can't easily map partitions to physical drives on Windows
-            if metadata and (total_used > 0 or total_free > 0):
-                # For simplicity, assign total usage to the first drive
-                # In practice, Windows physical drive mapping is complex
-                first_drive = next(iter(metadata.keys()))
-                metadata[first_drive]["used_b"] = total_used
-                metadata[first_drive]["available_b"] = total_free
-                self.logger.debug("Assigned total usage to drive %s: %d used, %d free",
-                                first_drive, total_used, total_free)
+            metadata[name]["used_b"] = total_used
+            metadata[name]["available_b"] = total_free
+
+    def _populate_usage_windows(self, metadata: dict[str, dict[str, Any]]) -> None:
+        """Populate drive usage on Windows by summing all partitions."""
+        partitions = psutil.disk_partitions(all=False)
+        total_used = 0
+        total_free = 0
+
+        for part in partitions:
+            try:
+                usage = psutil.disk_usage(part.mountpoint)
+                total_used += int(usage.used)
+                total_free += int(usage.free)
+            except OSError:
+                self.logger.debug("Skipping usage for %s (unreadable).", part.mountpoint)
+                continue
+
+        # Distribute total usage across all drives
+        # This is an approximation since we can't easily map partitions to physical drives on Windows
+        if metadata and (total_used > 0 or total_free > 0):
+            # For simplicity, assign total usage to the first drive
+            # In practice, Windows physical drive mapping is complex
+            first_drive = next(iter(metadata.keys()))
+            metadata[first_drive]["used_b"] = total_used
+            metadata[first_drive]["available_b"] = total_free
+            self.logger.debug("Assigned total usage to drive %s: %d used, %d free",
+                            first_drive, total_used, total_free)
 
     def _populate_smart(self, metadata: dict[str, dict[str, Any]]) -> None:
         if not metadata:
@@ -1372,6 +1577,11 @@ class MetricsCollector:
         sensors_board = self._collect_linux_sensors()
         if sensors_board:
             self._merge_motherboard(motherboard, sensors_board)
+
+        # Try sysfs DMI first (no root required), then fall back to dmidecode
+        sysfs_dmi = self._collect_sysfs_dmi()
+        if sysfs_dmi:
+            motherboard.update(sysfs_dmi)
 
         dmi_board = self._collect_dmidecode()
         if dmi_board:
@@ -1460,51 +1670,71 @@ class MetricsCollector:
             for label, readings in chip_data.items():
                 if not isinstance(readings, dict):
                     continue
+                # First pass: collect all values for this sensor
+                sensor_values: dict[str, float] = {}
                 for key, value in readings.items():
-                    if not isinstance(value, (int, float)):
+                    if isinstance(value, (int, float)):
+                        sensor_values[key] = float(value)
+
+                entry_name = f"{chip} {label}"
+
+                # Process temperature sensors with max values
+                temp_input = None
+                temp_max = None
+                for key, value in sensor_values.items():
+                    if key.endswith("_input") and key.startswith("temp"):
+                        temp_input = value
+                    elif key.endswith("_max") and key.startswith("temp"):
+                        temp_max = value
+
+                if temp_input is not None:
+                    temp_entry: dict[str, Any] = {
+                        "name": entry_name,
+                        "temp_c": temp_input,
+                        "source": "sensors",
+                    }
+                    if temp_max is not None:
+                        temp_entry["max_c"] = temp_max
+                    temps.append(temp_entry)
+
+                # Process other sensors
+                for key, value in sensor_values.items():
+                    if not key.endswith("_input"):
                         continue
-                    entry_name = f"{chip} {label}"
-                    if key.endswith("_input"):
-                        if key.startswith("temp"):
-                            temps.append(
-                                {
-                                    "name": entry_name,
-                                    "temp_c": float(value),
-                                    "source": "sensors",
-                                }
-                            )
-                        elif key.startswith("fan"):
-                            fans.append(
-                                {
-                                    "name": entry_name,
-                                    "rpm": float(value),
-                                    "source": "sensors",
-                                }
-                            )
-                        elif key.startswith("in"):
-                            voltages.append(
-                                {
-                                    "name": entry_name,
-                                    "voltage_v": float(value),
-                                    "source": "sensors",
-                                }
-                            )
-                        elif key.startswith("curr"):
-                            currents.append(
-                                {
-                                    "name": entry_name,
-                                    "current_a": float(value),
-                                    "source": "sensors",
-                                }
-                            )
-                        elif key.startswith("power"):
-                            powers.append(
-                                {
-                                    "name": entry_name,
-                                    "power_w": float(value),
-                                    "source": "sensors",
-                                }
-                            )
+                    if key.startswith("temp"):
+                        continue  # Already processed above
+                    if key.startswith("fan"):
+                        fans.append(
+                            {
+                                "name": entry_name,
+                                "rpm": value,
+                                "source": "sensors",
+                            }
+                        )
+                    elif key.startswith("in"):
+                        voltages.append(
+                            {
+                                "name": entry_name,
+                                "voltage_v": value,
+                                "source": "sensors",
+                            }
+                        )
+                    elif key.startswith("curr"):
+                        currents.append(
+                            {
+                                "name": entry_name,
+                                "current_a": value,
+                                "source": "sensors",
+                            }
+                        )
+                    elif key.startswith("power"):
+                        powers.append(
+                            {
+                                "name": entry_name,
+                                "power_w": value,
+                                "source": "sensors",
+                            }
+                        )
 
         motherboard: dict[str, Any] = {}
         if temps:
@@ -1519,6 +1749,98 @@ class MetricsCollector:
             motherboard["powers"] = powers
 
         return motherboard if motherboard else None
+
+    def _get_drive_temp_from_sensors(self, drive_name: str) -> float | None:
+        """Get drive temperature from Linux sensors for NVMe/SATA drives."""
+        output = self._run_command([self.config.sensors_path, "-j"])
+        if output is None:
+            return None
+        try:
+            data = json.loads(output)
+        except json.JSONDecodeError:
+            return None
+
+        # Look for nvme or drivetemp sensors matching the drive
+        for chip, chip_data in data.items():
+            if not isinstance(chip_data, dict):
+                continue
+            # Match nvme drives: nvme-pci-XXXX for nvmeXnY drives
+            if chip.startswith("nvme-") and drive_name.startswith("nvme"):
+                # Look for Composite temp (main drive temp)
+                for label, readings in chip_data.items():
+                    if not isinstance(readings, dict):
+                        continue
+                    if label.lower() == "composite":
+                        for key, value in readings.items():
+                            if key.endswith("_input") and isinstance(value, (int, float)):
+                                return float(value)
+            # Match SATA drives via drivetemp
+            elif chip.startswith("drivetemp-") and not drive_name.startswith("nvme"):
+                for label, readings in chip_data.items():
+                    if not isinstance(readings, dict):
+                        continue
+                    for key, value in readings.items():
+                        if key.endswith("_input") and isinstance(value, (int, float)):
+                            return float(value)
+        return None
+
+    def _collect_sysfs_dmi(self) -> dict[str, Any] | None:
+        """Collect motherboard info from /sys/class/dmi/id/ (no root required)."""
+        if platform.system().lower() != "linux":
+            return None
+
+        dmi_path = Path("/sys/class/dmi/id")
+        if not dmi_path.exists():
+            return None
+
+        result: dict[str, Any] = {}
+
+        # Read board info
+        board_vendor = self._read_sysfs_file(dmi_path / "board_vendor")
+        board_name = self._read_sysfs_file(dmi_path / "board_name")
+        if board_vendor:
+            result["manufacturer"] = board_vendor
+        if board_name:
+            result["name"] = board_name
+
+        # Read BIOS info
+        bios_version = self._read_sysfs_file(dmi_path / "bios_version")
+        bios_date = self._read_sysfs_file(dmi_path / "bios_date")
+        if bios_version:
+            result["bios_version"] = bios_version
+        if bios_date:
+            result["bios_date"] = bios_date
+
+        # Read chassis type
+        chassis_type_str = self._read_sysfs_file(dmi_path / "chassis_type")
+        if chassis_type_str:
+            try:
+                chassis_type = int(chassis_type_str)
+                chassis_names = {
+                    1: "Other", 2: "Unknown", 3: "Desktop", 4: "Low Profile Desktop",
+                    5: "Pizza Box", 6: "Mini Tower", 7: "Tower", 8: "Portable",
+                    9: "Laptop", 10: "Notebook", 11: "Hand Held", 12: "Docking Station",
+                    13: "All in One", 14: "Sub Notebook", 15: "Space-saving",
+                    16: "Lunch Box", 17: "Main Server Chassis", 18: "Expansion Chassis",
+                    19: "SubChassis", 20: "Bus Expansion Chassis", 21: "Peripheral Chassis",
+                    22: "RAID Chassis", 23: "Rack Mount Chassis", 24: "Sealed-case PC",
+                    25: "Multi-system chassis", 26: "Compact PCI", 27: "Advanced TCA",
+                    28: "Blade", 29: "Blade Enclosure", 30: "Tablet", 31: "Convertible",
+                    32: "Detachable", 33: "IoT Gateway", 34: "Embedded PC", 35: "Mini PC",
+                    36: "Stick PC",
+                }
+                result["chassis_type"] = chassis_names.get(chassis_type, f"Type {chassis_type}")
+            except ValueError:
+                pass
+
+        return result if result else None
+
+    def _read_sysfs_file(self, path: Path) -> str | None:
+        """Read a sysfs file and return its contents stripped, or None if unreadable."""
+        try:
+            return path.read_text().strip() or None
+        except (OSError, PermissionError):
+            return None
 
     def _collect_dmidecode(self) -> dict[str, Any] | None:
         if platform.system().lower() != "linux":
@@ -1703,6 +2025,260 @@ class MetricsCollector:
 
             gpus.append(entry)
         return gpus
+
+    def _collect_intel_gpu(self) -> dict[str, Any] | None:
+        """Collect Intel iGPU metrics using intel_gpu_top."""
+        if platform.system().lower() != "linux":
+            return None
+        # intel_gpu_top runs continuously, so we need to use timeout
+        try:
+            result = subprocess.run(
+                [self.config.intel_gpu_top_path, "-J", "-s", "500", "-o", "-"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            output = result.stdout
+        except subprocess.TimeoutExpired as e:
+            # This is expected - intel_gpu_top runs until killed
+            output = e.stdout.decode("utf-8") if e.stdout else None
+        except FileNotFoundError:
+            self.logger.debug("intel_gpu_top not found.")
+            return None
+        except Exception as e:
+            self.logger.debug("intel_gpu_top failed: %s", e)
+            return None
+        if not output:
+            self.logger.debug("intel_gpu_top produced no output.")
+            return None
+        # intel_gpu_top outputs multiple JSON objects, take the last complete one
+        lines = output.strip().split("\n")
+        last_obj = None
+        brace_count = 0
+        obj_start = -1
+        for i, line in enumerate(lines):
+            brace_count += line.count("{") - line.count("}")
+            if "{" in line and obj_start < 0:
+                obj_start = i
+            if brace_count == 0 and obj_start >= 0:
+                try:
+                    obj_str = "\n".join(lines[obj_start : i + 1])
+                    last_obj = json.loads(obj_str)
+                except json.JSONDecodeError:
+                    pass
+                obj_start = -1
+        if not last_obj:
+            self.logger.debug("Failed to parse intel_gpu_top JSON output.")
+            return None
+
+        # Build GPU entry
+        entry: dict[str, Any] = {"name": "Intel Integrated Graphics"}
+
+        # RC6 is idle percentage, so utilization = 100 - rc6
+        rc6 = last_obj.get("rc6", {}).get("value", 0)
+        core_load = max(0, min(100, 100 - rc6))
+
+        core: dict[str, Any] = {"name": "Core", "load_pct": round(core_load, 1)}
+
+        # Frequency (convert MHz to Hz)
+        freq = last_obj.get("frequency", {})
+        actual_mhz = freq.get("actual", 0)
+        if actual_mhz:
+            core["clock_hz"] = int(actual_mhz * 1_000_000)
+
+        # Power
+        power = last_obj.get("power", {})
+        gpu_power = power.get("GPU")
+        if gpu_power is not None:
+            core["power_w"] = round(gpu_power, 2)
+
+        entry["core"] = core
+
+        # Engines
+        engines_data = last_obj.get("engines", {})
+        engines: list[dict[str, Any]] = []
+        for engine_name, engine_info in engines_data.items():
+            busy = engine_info.get("busy", 0)
+            engines.append({"name": engine_name, "load_pct": round(busy, 1)})
+        if engines:
+            entry["engines"] = engines
+        else:
+            entry["engines"] = [{"name": "Core", "load_pct": core["load_pct"]}]
+
+        return entry
+
+    def _collect_tpus(self) -> list[dict[str, Any]]:
+        """Collect TPU metrics from Google Coral Edge TPU via sysfs."""
+        if platform.system().lower() != "linux":
+            return []
+        if not self.config.enable_tpu:
+            return []
+
+        tpus: list[dict[str, Any]] = []
+        apex_path = Path("/sys/class/apex")
+        if not apex_path.exists():
+            self.logger.debug("No TPU devices found (apex sysfs not present).")
+            return []
+
+        for apex_dir in sorted(apex_path.iterdir()):
+            if not apex_dir.is_dir():
+                continue
+            name = apex_dir.name
+            entry: dict[str, Any] = {"name": name}
+
+            # Read device type
+            device_type_file = apex_dir / "device_type"
+            if device_type_file.exists():
+                try:
+                    device_type = device_type_file.read_text().strip()
+                    if device_type == "apex":
+                        entry["vendor"] = "Google"
+                        entry["model"] = "Coral Edge TPU"
+                except OSError:
+                    pass
+
+            # Read temperature (in millicelsius)
+            temp_file = apex_dir / "temp"
+            if temp_file.exists():
+                try:
+                    temp_mc = int(temp_file.read_text().strip())
+                    entry["temp_c"] = round(temp_mc / 1000, 1)
+                except (OSError, ValueError):
+                    pass
+
+            # Build thermal info with trip points
+            thermal: dict[str, Any] = {}
+            if "temp_c" in entry:
+                thermal["temp_c"] = entry["temp_c"]
+
+            # Trip points (thermal throttling thresholds)
+            trip_points = []
+            for i in range(3):
+                trip_file = apex_dir / f"trip_point{i}_temp"
+                if trip_file.exists():
+                    try:
+                        trip_mc = int(trip_file.read_text().strip())
+                        trip_points.append(trip_mc / 1000)
+                    except (OSError, ValueError):
+                        pass
+
+            if trip_points:
+                # First trip point is typically warning, last is critical
+                thermal["warning_c"] = trip_points[0]
+                if len(trip_points) > 1:
+                    thermal["critical_c"] = trip_points[-1]
+
+            # Hardware warning thresholds
+            hw_warn1_file = apex_dir / "hw_temp_warn1"
+            hw_warn1_en_file = apex_dir / "hw_temp_warn1_en"
+            if hw_warn1_file.exists() and hw_warn1_en_file.exists():
+                try:
+                    enabled = int(hw_warn1_en_file.read_text().strip())
+                    if enabled:
+                        warn_mc = int(hw_warn1_file.read_text().strip())
+                        thermal.setdefault("critical_c", warn_mc / 1000)
+                except (OSError, ValueError):
+                    pass
+
+            # Check if throttling (temp above first trip point)
+            if "temp_c" in entry and "warning_c" in thermal:
+                thermal["throttling"] = entry["temp_c"] >= thermal["warning_c"]
+
+            if thermal:
+                entry["thermal"] = thermal
+
+            # Read status
+            status_file = apex_dir / "status"
+            if status_file.exists():
+                try:
+                    status = status_file.read_text().strip()
+                    # If not ALIVE, report as issue
+                    if status != "ALIVE":
+                        self.logger.warning("TPU %s status: %s", name, status)
+                except OSError:
+                    pass
+
+            tpus.append(entry)
+
+        return tpus
+
+    def _collect_backup_providers(self) -> list[dict[str, Any]]:
+        """Collect Borg backup repository status."""
+        if not self.config.borg_repos:
+            return []
+
+        providers: list[dict[str, Any]] = []
+        for repo in self.config.borg_repos:
+            entry: dict[str, Any] = {
+                "name": Path(repo).name or repo,
+                "type": "borg",
+                "repo": repo,
+            }
+
+            # Get repository info
+            info_output = self._run_command(
+                [self.config.borg_path, "info", "--json", repo],
+                stderr=subprocess.DEVNULL,
+            )
+            if info_output:
+                try:
+                    info = json.loads(info_output)
+                    repo_info = info.get("repository", {})
+                    if "last_modified" in repo_info:
+                        entry["last_success_ts"] = repo_info["last_modified"]
+                    cache = info.get("cache", {})
+                    stats = cache.get("stats", {})
+                    if "total_size" in stats:
+                        entry["repo_size_b"] = stats["total_size"]
+                    if "total_csize" in stats:
+                        entry["compression"] = f"ratio {stats.get('total_size', 0) / max(stats.get('total_csize', 1), 1):.2f}"
+                    # Check encryption
+                    enc = info.get("encryption", {})
+                    if enc.get("mode"):
+                        entry["encryption"] = enc["mode"]
+                except json.JSONDecodeError:
+                    self.logger.debug("Failed to parse borg info JSON for %s", repo)
+
+            # Get list of archives to find the latest
+            list_output = self._run_command(
+                [self.config.borg_path, "list", "--json", repo],
+                stderr=subprocess.DEVNULL,
+            )
+            if list_output:
+                try:
+                    list_data = json.loads(list_output)
+                    archives = list_data.get("archives", [])
+                    if archives:
+                        entry["retention"] = {"snapshots": len(archives)}
+                        # Find most recent archive
+                        latest = max(archives, key=lambda a: a.get("time", ""))
+                        if latest.get("time"):
+                            entry["last_success_ts"] = latest["time"]
+                            # Calculate age
+                            try:
+                                last_dt = datetime.fromisoformat(
+                                    latest["time"].replace("Z", "+00:00")
+                                )
+                                now = datetime.now(timezone.utc)
+                                entry["age_s"] = int((now - last_dt).total_seconds())
+                            except ValueError:
+                                pass
+                except json.JSONDecodeError:
+                    self.logger.debug("Failed to parse borg list JSON for %s", repo)
+
+            # Determine health: ok if we could read the repo and it's not too old
+            entry["ok"] = info_output is not None
+            if entry.get("age_s", 0) > 86400 * 7:  # Warn if older than 7 days
+                entry["ok"] = False
+                entry["last_status"] = "stale"
+            elif entry["ok"]:
+                entry["last_status"] = "success"
+            else:
+                entry["last_status"] = "unknown"
+
+            providers.append(entry)
+
+        return providers
 
     def _read_lhm(self) -> dict[str, Any] | None:
         if not self.config.librehardwaremonitor_url:

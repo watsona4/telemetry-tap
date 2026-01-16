@@ -31,7 +31,14 @@ class CollectorConfig:
     lsblk_path: str
     sensors_path: str
     dmidecode_path: str
+    apt_path: str
+    dnf_path: str
+    systemctl_path: str
     librehardwaremonitor_url: str | None
+    intel_gpu_top_path: str
+    borg_path: str
+    borg_repos: list[str]
+    enable_tpu: bool
 
 
 @dataclass(frozen=True)
@@ -95,9 +102,16 @@ def load_config(path: str | Path) -> AppConfig:
         lsblk_path=str(collector_section.get("lsblk_path", "lsblk")),
         sensors_path=str(collector_section.get("sensors_path", "sensors")),
         dmidecode_path=str(collector_section.get("dmidecode_path", "dmidecode")),
+        apt_path=str(collector_section.get("apt_path", "apt")),
+        dnf_path=str(collector_section.get("dnf_path", "dnf")),
+        systemctl_path=str(collector_section.get("systemctl_path", "systemctl")),
         librehardwaremonitor_url=_get_optional(
             collector_section.get("librehardwaremonitor_url")
         ),
+        intel_gpu_top_path=str(collector_section.get("intel_gpu_top_path", "intel_gpu_top")),
+        borg_path=str(collector_section.get("borg_path", "borg")),
+        borg_repos=_get_list(collector_section.get("borg_repos")),
+        enable_tpu=collector_section.getboolean("enable_tpu", True),
     )
 
     health = HealthConfig(

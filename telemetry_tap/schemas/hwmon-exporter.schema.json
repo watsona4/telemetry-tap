@@ -69,6 +69,21 @@
           "type": "integer",
           "minimum": 0,
           "description": "Host uptime in seconds at the time the payload was generated."
+        },
+        "process_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of running processes at the time the payload was generated."
+        },
+        "context_switches": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total context switches since boot (cumulative counter from /proc/stat or equivalent)."
+        },
+        "interrupts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total hardware interrupts since boot (cumulative counter)."
         }
       },
       "required": [
@@ -258,6 +273,10 @@
         "bios_date": {
           "type": "string",
           "description": "BIOS/UEFI release date string as reported by the collector, if available."
+        },
+        "chassis_type": {
+          "type": "string",
+          "description": "Chassis/enclosure type (for example: 'Desktop', 'Laptop', 'Tower', 'Rack Mount Chassis')."
         },
         "temps": {
           "type": "array",

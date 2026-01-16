@@ -24,7 +24,14 @@ def collector_config():
         lsblk_path="lsblk",
         sensors_path="sensors",
         dmidecode_path="dmidecode",
+        apt_path="apt",
+        dnf_path="dnf",
+        systemctl_path="systemctl",
         librehardwaremonitor_url="http://localhost:8085/data.json",
+        intel_gpu_top_path="intel_gpu_top",
+        borg_path="borg",
+        borg_repos=[],
+        enable_tpu=False,
     )
 
 

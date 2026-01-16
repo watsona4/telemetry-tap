@@ -579,6 +579,11 @@ class MetricsCollector:
 
         metadata: dict[str, dict[str, Any]] = {}
         metadata.update(self._drive_metadata_lsblk())
+
+        # On Windows, create basic metadata from IO stats
+        if not metadata and platform.system().lower() == "windows":
+            metadata.update(self._drive_metadata_windows())
+
         self._populate_usage(metadata)
         self._populate_smart(metadata)
         self.state.drive_cache = metadata
@@ -616,6 +621,23 @@ class MetricsCollector:
                 else None,
                 "partitions": partitions,
             }
+        return metadata
+
+    def _drive_metadata_windows(self) -> dict[str, dict[str, Any]]:
+        """Create basic drive metadata on Windows from IO stats."""
+        io_stats = psutil.disk_io_counters(perdisk=True)
+        if not io_stats:
+            return {}
+
+        metadata: dict[str, dict[str, Any]] = {}
+        for drive_name in io_stats.keys():
+            metadata[drive_name] = {
+                "manufacturer": "unknown",
+                "model": drive_name,
+                "type": "unknown",
+            }
+
+        self.logger.debug("Created Windows drive metadata for %d drives", len(metadata))
         return metadata
 
     def _parse_lsblk_partitions(self, children: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -660,18 +682,47 @@ class MetricsCollector:
     def _populate_usage(self, metadata: dict[str, dict[str, Any]]) -> None:
         if not metadata:
             return
+
         partitions = psutil.disk_partitions(all=False)
-        for part in partitions:
-            device = Path(part.device).name
-            if device not in metadata:
-                continue
-            try:
-                usage = psutil.disk_usage(part.mountpoint)
-            except OSError:
-                self.logger.debug("Skipping usage for %s (unreadable).", part.mountpoint)
-                continue
-            metadata[device]["used_b"] = int(usage.used)
-            metadata[device]["available_b"] = int(usage.free)
+
+        # On Linux, match partitions to drives by device name
+        if platform.system().lower() == "linux":
+            for part in partitions:
+                device = Path(part.device).name
+                if device not in metadata:
+                    continue
+                try:
+                    usage = psutil.disk_usage(part.mountpoint)
+                except OSError:
+                    self.logger.debug("Skipping usage for %s (unreadable).", part.mountpoint)
+                    continue
+                metadata[device]["used_b"] = int(usage.used)
+                metadata[device]["available_b"] = int(usage.free)
+
+        # On Windows, sum all partition usage for all drives
+        elif platform.system().lower() == "windows":
+            total_used = 0
+            total_free = 0
+
+            for part in partitions:
+                try:
+                    usage = psutil.disk_usage(part.mountpoint)
+                    total_used += int(usage.used)
+                    total_free += int(usage.free)
+                except OSError:
+                    self.logger.debug("Skipping usage for %s (unreadable).", part.mountpoint)
+                    continue
+
+            # Distribute total usage across all drives
+            # This is an approximation since we can't easily map partitions to physical drives on Windows
+            if metadata and (total_used > 0 or total_free > 0):
+                # For simplicity, assign total usage to the first drive
+                # In practice, Windows physical drive mapping is complex
+                first_drive = next(iter(metadata.keys()))
+                metadata[first_drive]["used_b"] = total_used
+                metadata[first_drive]["available_b"] = total_free
+                self.logger.debug("Assigned total usage to drive %s: %d used, %d free",
+                                first_drive, total_used, total_free)
 
     def _populate_smart(self, metadata: dict[str, dict[str, Any]]) -> None:
         if not metadata:

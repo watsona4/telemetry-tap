@@ -162,8 +162,16 @@ class TestWindowsCollector:
             assert "memory" in payload
 
     @patch("telemetry_tap.collector.MetricsCollector._run_command")
-    def test_linux_tools_not_used_on_windows(self, mock_run_command, mock_windows, collector):
+    @patch("psutil.disk_io_counters")
+    def test_linux_tools_not_used_on_windows(self, mock_io_counters, mock_run_command, mock_windows, collector):
         """Test that Linux-specific tools are not called on Windows."""
+        # Mock IO counters to provide drive data
+        mock_io_counters.return_value = {
+            "PhysicalDrive0": Mock(read_bytes=1000, write_bytes=2000)
+        }
+        # Mock _run_command to return None for smartctl (not available)
+        mock_run_command.return_value = None
+
         collector._drive_metadata()
 
         # lsblk should not be called on Windows

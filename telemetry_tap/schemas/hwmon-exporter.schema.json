@@ -1175,6 +1175,130 @@
           "firmware_version": {
             "type": "string",
             "description": "Drive firmware revision string, if reported by the device."
+          },
+          "partitions": {
+            "type": "array",
+            "description": "Partitions discovered on this physical drive (or logical block device), if available.",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Partition identifier as reported by the OS/collector (for example: '/dev/nvme0n1p2', 'Disk 0 Partition 2')."
+                },
+                "number": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Partition number on the disk, if available."
+                },
+                "type_guid": {
+                  "type": "string",
+                  "description": "GPT partition type GUID (or other partition type identifier), if available."
+                },
+                "label": {
+                  "type": "string",
+                  "description": "Partition label, if available."
+                },
+                "uuid": {
+                  "type": "string",
+                  "description": "Partition UUID (PARTUUID or equivalent), if available."
+                },
+                "fstype": {
+                  "type": "string",
+                  "description": "Filesystem type on the partition (for example: ext4, xfs, btrfs, ntfs) if directly formatted; may be absent for encrypted/LVM/container partitions."
+                },
+                "size_b": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Total partition size in bytes, if available."
+                },
+                "start_lba": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Starting LBA/sector for the partition, if available."
+                },
+                "end_lba": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Ending LBA/sector for the partition, if available."
+                },
+                "content": {
+                  "type": "string",
+                  "enum": [
+                    "filesystem",
+                    "encrypted",
+                    "lvm_pv",
+                    "raid_member",
+                    "swap",
+                    "unknown"
+                  ],
+                  "description": "High-level content type of the partition."
+                },
+                "encryption": {
+                  "type": "object",
+                  "description": "Encryption wrapper information if the partition is encrypted or participates in an encrypted stack.",
+                  "additionalProperties": false,
+                  "properties": {
+                    "encrypted": {
+                      "type": "boolean",
+                      "description": "True if an encryption layer is present for this partition."
+                    },
+                    "scheme": {
+                      "type": "string",
+                      "description": "Encryption scheme (for example: 'luks', 'bitlocker', 'filevault', 'veracrypt', 'cryptsetup', 'unknown')."
+                    },
+                    "version": {
+                      "type": "string",
+                      "description": "Encryption format version (for example: 'LUKS1', 'LUKS2') if available."
+                    },
+                    "cipher": {
+                      "type": "string",
+                      "description": "Cipher description (for example: 'aes-xts-plain64'), if available."
+                    },
+                    "key_size_bits": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Key size in bits, if available."
+                    },
+                    "mode": {
+                      "type": "string",
+                      "description": "Cipher mode/variant, if available."
+                    },
+                    "mapper_name": {
+                      "type": "string",
+                      "description": "Mapped device name (for example: 'cryptroot') if applicable."
+                    },
+                    "mapped_device": {
+                      "type": "string",
+                      "description": "Mapped device path/identifier (for example: '/dev/mapper/cryptroot'), if applicable."
+                    },
+                    "unlocked": {
+                      "type": "boolean",
+                      "description": "True if the encrypted volume is currently unlocked/mapped."
+                    }
+                  },
+                  "required": [
+                    "encrypted"
+                  ]
+                },
+                "holders": {
+                  "type": "array",
+                  "description": "Higher-level block devices layered on top of this partition (dm-crypt, LVM LV, RAID, etc.), if known.",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "source": {
+                  "type": "string",
+                  "description": "Collector/source for partition metadata (for example: 'lsblk', 'wmic', 'lhm', 'diskpart')."
+                }
+              },
+              "required": [
+                "name"
+              ]
+            }
           }
         },
         "required": [
@@ -1237,6 +1361,62 @@
             "minimum": 0,
             "maximum": 100,
             "description": "Filesystem write activity percentage, if available."
+          }
+        ,
+          "backing_blockdev": {
+            "type": "object",
+            "description": "Block-device lineage for this filesystem/mount (partition/LVM/dm-crypt/RAID), if available.",
+            "additionalProperties": false,
+            "properties": {
+              "device": {
+                "type": "string",
+                "description": "Device path or identifier backing this mount (for example: '/dev/mapper/cryptroot', '/dev/nvme0n1p2')."
+              },
+              "drive_name": {
+                "type": "string",
+                "description": "Reference to drives[].name when the mapping is known."
+              },
+              "partition_name": {
+                "type": "string",
+                "description": "Reference to drives[].partitions[].name when known."
+              },
+              "stack": {
+                "type": "array",
+                "description": "Ordered stack from closest-to-filesystem to closest-to-physical (for example: ['ext4','lvm_lv','dm_crypt','gpt_partition']).",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "device"
+            ]
+          },
+          "encryption": {
+            "type": "object",
+            "description": "Encryption characteristics of the storage backing this filesystem, if applicable.",
+            "additionalProperties": false,
+            "properties": {
+              "encrypted": {
+                "type": "boolean",
+                "description": "True if this filesystem's data path is encrypted at rest."
+              },
+              "scheme": {
+                "type": "string",
+                "description": "Encryption scheme (for example: 'luks', 'bitlocker', 'filevault', 'veracrypt', 'unknown')."
+              },
+              "mapper_name": {
+                "type": "string",
+                "description": "Mapped device name (for example: 'cryptroot') if applicable."
+              },
+              "mapped_device": {
+                "type": "string",
+                "description": "Mapped device path/identifier (for example: '/dev/mapper/cryptroot') if applicable."
+              }
+            },
+            "required": [
+              "encrypted"
+            ]
           }
         },
         "required": [

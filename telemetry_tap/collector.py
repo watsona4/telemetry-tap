@@ -222,21 +222,34 @@ class MetricsCollector:
 
     def _collect_filesystems(self) -> list[dict[str, Any]]:
         filesystems: list[dict[str, Any]] = []
+        drive_metadata = self.state.drive_cache or self._drive_metadata()
+        partition_map: dict[str, str] = {}
+        for drive_name, meta in drive_metadata.items():
+            for partition in meta.get("partitions", []):
+                partition_name = partition.get("name")
+                if partition_name:
+                    partition_map[partition_name] = drive_name
         for part in psutil.disk_partitions(all=False):
             try:
                 usage = psutil.disk_usage(part.mountpoint)
             except OSError:
                 self.logger.debug("Skipping filesystem at %s (unreadable).", part.mountpoint)
                 continue
-            filesystems.append(
-                {
-                    "name": part.device,
-                    "mountpoint": part.mountpoint,
-                    "format": part.fstype,
-                    "used_b": int(usage.used),
-                    "available_b": int(usage.free),
+            entry = {
+                "name": part.device,
+                "mountpoint": part.mountpoint,
+                "format": part.fstype,
+                "used_b": int(usage.used),
+                "available_b": int(usage.free),
+            }
+            drive_name = partition_map.get(part.device)
+            if drive_name:
+                entry["backing_blockdev"] = {
+                    "device": part.device,
+                    "drive_name": drive_name,
+                    "partition_name": part.device,
                 }
-            )
+            filesystems.append(entry)
         return filesystems
 
     def _collect_drives(self) -> list[dict[str, Any]]:
@@ -593,6 +606,7 @@ class MetricsCollector:
             if not name:
                 continue
             drive_type = "HDD" if block.get("rota") else "SSD"
+            partitions = self._parse_lsblk_partitions(block.get("children", []))
             metadata[name] = {
                 "manufacturer": block.get("vendor") or "unknown",
                 "model": block.get("model") or "unknown",
@@ -600,8 +614,48 @@ class MetricsCollector:
                 "listed_cap_b": block.get("size")
                 if isinstance(block.get("size"), int)
                 else None,
+                "partitions": partitions,
             }
         return metadata
+
+    def _parse_lsblk_partitions(self, children: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        partitions: list[dict[str, Any]] = []
+        for child in children or []:
+            if child.get("type") != "part":
+                continue
+            name = child.get("name")
+            if not name:
+                continue
+            content = "filesystem"
+            fstype = child.get("fstype")
+            if child.get("type") == "crypt" or fstype in {"crypto_LUKS"}:
+                content = "encrypted"
+            if fstype in {"swap"}:
+                content = "swap"
+            partition: dict[str, Any] = {
+                "name": child.get("path") or f"/dev/{name}",
+                "number": child.get("partno"),
+                "type_guid": child.get("parttype"),
+                "label": child.get("partlabel"),
+                "uuid": child.get("partuuid"),
+                "fstype": fstype,
+                "size_b": child.get("size") if isinstance(child.get("size"), int) else None,
+                "start_lba": child.get("start"),
+                "end_lba": child.get("end"),
+                "content": content,
+                "holders": child.get("holders"),
+                "source": "lsblk",
+            }
+            if fstype in {"crypto_LUKS"}:
+                partition["encryption"] = {
+                    "encrypted": True,
+                    "scheme": "luks",
+                    "mapper_name": child.get("name"),
+                    "mapped_device": child.get("path"),
+                    "unlocked": True,
+                }
+            partitions.append({k: v for k, v in partition.items() if v is not None})
+        return partitions
 
     def _populate_usage(self, metadata: dict[str, dict[str, Any]]) -> None:
         if not metadata:

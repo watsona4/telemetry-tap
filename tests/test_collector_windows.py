@@ -200,15 +200,27 @@ class TestWindowsCollector:
 class TestWindowsHealthChecks:
     """Test health check functionality on Windows."""
 
-    def test_service_checks_not_available_on_windows(self, mock_windows, health_config, collector_config):
-        """Test that systemd service checks are skipped on Windows."""
-        health = HealthConfig(services=["test-service"], containers=[])
+    @patch("subprocess.run")
+    def test_service_checks_work_on_windows(self, mock_run, mock_windows, health_config, collector_config):
+        """Test that Windows service checks work properly."""
+        health = HealthConfig(services=["wuauserv"], containers=[])
         collector = MetricsCollector(collector_config, health)
+
+        # Mock PowerShell response for Windows service query
+        mock_run.return_value = Mock(
+            returncode=0,
+            stdout='[{"Name": "wuauserv", "Status": 4, "StartType": 2}]',
+            stderr="",
+        )
 
         services = collector._collect_services()
 
-        # Should return empty list on Windows
-        assert services == []
+        # Should return Windows service status
+        assert len(services) == 1
+        assert services[0]["name"] == "wuauserv"
+        assert services[0]["status"] == "active"
+        assert services[0]["ok"] is True
+        assert services[0]["loaded"] == "loaded"
 
     @patch("subprocess.run")
     def test_docker_container_checks_work_on_windows(self, mock_run, mock_windows, health_config, collector_config):

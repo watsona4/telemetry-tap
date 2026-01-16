@@ -704,6 +704,11 @@
             "minimum": 0,
             "description": "CPU SoC/uncore voltage in volts, if available."
           },
+          "power_w": {
+            "type": "number",
+            "minimum": 0,
+            "description": "CPU package power consumption in watts, if available."
+          },
           "load_1m": {
             "type": "number",
             "minimum": 0,
@@ -1329,6 +1334,14 @@
           "format": {
             "type": "string",
             "description": "Filesystem format/type (for example: ext4, xfs, btrfs, ntfs)."
+          },
+          "label": {
+            "type": "string",
+            "description": "Volume label assigned to the filesystem, if any."
+          },
+          "uuid": {
+            "type": "string",
+            "description": "Unique identifier (UUID) for the filesystem or volume."
           },
           "used_b": {
             "type": "integer",

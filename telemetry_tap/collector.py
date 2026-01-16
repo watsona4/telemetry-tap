@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -34,10 +35,49 @@ class NetSnapshot:
 
 
 @dataclass
+class LoadAverage:
+    """Exponentially weighted moving average for load calculation."""
+    load_1m: float = 0.0
+    load_5m: float = 0.0
+    load_15m: float = 0.0
+    last_update: float = 0.0
+
+    def update(self, load_pct: float, timestamp: float) -> None:
+        """Update load averages with a new sample.
+
+        Uses exponential smoothing similar to Unix load average calculation.
+        The smoothing factors approximate 1/e decay over the respective periods.
+        """
+        if self.last_update == 0:
+            # First sample - initialize all averages
+            self.load_1m = load_pct
+            self.load_5m = load_pct
+            self.load_15m = load_pct
+            self.last_update = timestamp
+            return
+
+        elapsed = timestamp - self.last_update
+        if elapsed <= 0:
+            return
+
+        # Smoothing factors based on elapsed time
+        # exp(-elapsed/period) gives the weight for the old value
+        alpha_1m = 1 - math.exp(-elapsed / 60)
+        alpha_5m = 1 - math.exp(-elapsed / 300)
+        alpha_15m = 1 - math.exp(-elapsed / 900)
+
+        self.load_1m = alpha_1m * load_pct + (1 - alpha_1m) * self.load_1m
+        self.load_5m = alpha_5m * load_pct + (1 - alpha_5m) * self.load_5m
+        self.load_15m = alpha_15m * load_pct + (1 - alpha_15m) * self.load_15m
+        self.last_update = timestamp
+
+
+@dataclass
 class MetricsState:
     last_disk: IoSnapshot | None = None
     last_net: NetSnapshot | None = None
     drive_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
+    load_avg: LoadAverage = field(default_factory=LoadAverage)
 
 
 class MetricsCollector:
@@ -124,6 +164,11 @@ class MetricsCollector:
             health["services"] = services
         if containers:
             health["containers"] = containers
+
+        updates = self._collect_updates()
+        if updates:
+            health["updates"] = updates
+
         return health
 
     def _collect_cpus(self) -> list[dict[str, Any]]:
@@ -167,7 +212,12 @@ class MetricsCollector:
             "cores": cores,
         }
 
+        # Get or compute load averages
+        current_load = cpu_entry["load_pct"]
+        now = datetime.now(timezone.utc).timestamp()
+
         if hasattr(os, "getloadavg"):
+            # Unix - use native load averages
             load_1m, load_5m, load_15m = os.getloadavg()
             cpu_entry.update(
                 {
@@ -176,6 +226,18 @@ class MetricsCollector:
                     "load_15m": float(load_15m),
                 }
             )
+        else:
+            # Windows - compute load averages from CPU usage samples
+            self.state.load_avg.update(current_load, now)
+            # Only include if we have meaningful data (not first sample)
+            if self.state.load_avg.last_update > 0:
+                cpu_entry.update(
+                    {
+                        "load_1m": round(self.state.load_avg.load_1m, 2),
+                        "load_5m": round(self.state.load_avg.load_5m, 2),
+                        "load_15m": round(self.state.load_avg.load_15m, 2),
+                    }
+                )
 
         temps = None
         if hasattr(psutil, "sensors_temperatures"):
@@ -190,7 +252,7 @@ class MetricsCollector:
 
         lhm_cpu = self._collect_lhm_cpu()
         if lhm_cpu:
-            for key in ["temp_c", "voltage_core_v", "voltage_soc_v"]:
+            for key in ["temp_c", "voltage_core_v", "voltage_soc_v", "power_w"]:
                 if key in lhm_cpu and lhm_cpu[key] is not None:
                     cpu_entry[key] = lhm_cpu[key]
             core_metrics = lhm_cpu.get("cores", {})
@@ -223,32 +285,112 @@ class MetricsCollector:
     def _collect_filesystems(self) -> list[dict[str, Any]]:
         filesystems: list[dict[str, Any]] = []
         drive_metadata = self.state.drive_cache or self._drive_metadata()
+        is_windows = platform.system().lower() == "windows"
+
+        # Build partition-to-drive mapping
         partition_map: dict[str, str] = {}
         for drive_name, meta in drive_metadata.items():
             for partition in meta.get("partitions", []):
                 partition_name = partition.get("name")
                 if partition_name:
                     partition_map[partition_name] = drive_name
-        for part in psutil.disk_partitions(all=False):
+
+        # Windows-specific: map drive letters to physical disk numbers
+        windows_partition_map: dict[str, int] = {}
+        if is_windows:
+            windows_partition_map = self._windows_partition_map()
+
+        # Get LHM drive data for metrics
+        lhm_data = self._read_lhm()
+        lhm_drives = self._collect_lhm_drives(lhm_data)
+
+        # Build a mapping from disk number to LHM drive data (for Windows)
+        # When there's only one drive in each, they match
+        lhm_by_disk: dict[int, dict[str, Any]] = {}
+        if is_windows and lhm_drives:
+            if len(drive_metadata) == 1 and len(lhm_drives) == 1:
+                # Single drive case - map disk 0 to the LHM data
+                lhm_by_disk[0] = next(iter(lhm_drives.values()))
+            # TODO: Multi-drive matching could be enhanced
+
+        # Collect partitions first
+        partitions = psutil.disk_partitions(all=False)
+
+        # Get BitLocker status on Windows
+        bitlocker_status: dict[str, dict[str, Any]] = {}
+        volume_metadata: dict[str, dict[str, Any]] = {}
+        if is_windows:
+            mountpoints = [p.mountpoint for p in partitions]
+            bitlocker_status = self._windows_bitlocker_status(mountpoints)
+            volume_metadata = self._windows_volume_metadata()
+
+        for part in partitions:
             try:
                 usage = psutil.disk_usage(part.mountpoint)
             except OSError:
                 self.logger.debug("Skipping filesystem at %s (unreadable).", part.mountpoint)
                 continue
-            entry = {
+            entry: dict[str, Any] = {
                 "name": part.device,
                 "mountpoint": part.mountpoint,
                 "format": part.fstype,
                 "used_b": int(usage.used),
                 "available_b": int(usage.free),
             }
+
+            # Determine backing drive
             drive_name = partition_map.get(part.device)
+            disk_number: int | None = None
+
             if drive_name:
+                # Linux path - have partition info from lsblk
                 entry["backing_blockdev"] = {
                     "device": part.device,
                     "drive_name": drive_name,
                     "partition_name": part.device,
                 }
+            elif is_windows:
+                # Windows path - use partition map
+                disk_number = windows_partition_map.get(part.mountpoint)
+                if disk_number is not None:
+                    drive_name = f"PhysicalDrive{disk_number}"
+                    entry["backing_blockdev"] = {
+                        "device": part.device,
+                        "drive_name": drive_name,
+                    }
+
+            # Add LHM metrics if available
+            lhm_match = None
+            if drive_name and drive_name in lhm_drives:
+                lhm_match = lhm_drives[drive_name]
+            elif disk_number is not None and disk_number in lhm_by_disk:
+                lhm_match = lhm_by_disk[disk_number]
+
+            if lhm_match:
+                if "read_rate_bps" in lhm_match:
+                    entry["read_rate_bps"] = lhm_match["read_rate_bps"]
+                if "write_rate_bps" in lhm_match:
+                    entry["write_rate_bps"] = lhm_match["write_rate_bps"]
+                if "read_activity_pct" in lhm_match:
+                    entry["read_activity_pct"] = lhm_match["read_activity_pct"]
+                if "write_activity_pct" in lhm_match:
+                    entry["write_activity_pct"] = lhm_match["write_activity_pct"]
+
+            # Add encryption info if available
+            if part.mountpoint in bitlocker_status:
+                entry["encryption"] = bitlocker_status[part.mountpoint]
+
+            # Add volume metadata (label, uuid, fstype) on Windows
+            if part.mountpoint in volume_metadata:
+                vol_meta = volume_metadata[part.mountpoint]
+                if "label" in vol_meta:
+                    entry["label"] = vol_meta["label"]
+                if "uuid" in vol_meta:
+                    entry["uuid"] = vol_meta["uuid"]
+                # Update fstype if available from Get-Volume (more reliable on Windows)
+                if "fstype" in vol_meta:
+                    entry["format"] = vol_meta["fstype"]
+
             filesystems.append(entry)
         return filesystems
 
@@ -288,12 +430,18 @@ class MetricsCollector:
                 "model": meta.get("model", "unknown"),
                 "used_b": meta.get("used_b", 0),
                 "available_b": meta.get("available_b", 0),
-                "listed_cap_b": meta.get("listed_cap_b"),
-                "serial_number": meta.get("serial"),
-                "firmware_version": meta.get("firmware"),
                 "total_read_b": int(io_entry.read_bytes),
                 "total_write_b": int(io_entry.write_bytes),
             }
+            # Only include optional fields if they have values
+            if meta.get("listed_cap_b") is not None:
+                entry["listed_cap_b"] = meta["listed_cap_b"]
+            if meta.get("serial"):
+                entry["serial_number"] = meta["serial"]
+            if meta.get("firmware"):
+                entry["firmware_version"] = meta["firmware"]
+            if meta.get("partitions"):
+                entry["partitions"] = meta["partitions"]
 
             if self.state.last_disk and name in self.state.last_disk.values:
                 elapsed = now - self.state.last_disk.timestamp
@@ -309,7 +457,19 @@ class MetricsCollector:
             smart = meta.get("smart")
             if smart:
                 entry["smart"] = smart
+
+            # Try to find matching LHM drive data
+            lhm_match = None
             if name in lhm_drives:
+                # Direct name match (Linux/lsblk)
+                lhm_match = lhm_drives[name]
+            elif len(lhm_drives) == 1 and len(metadata) == 1:
+                # Single drive on both sides - match them (Windows)
+                lhm_name, lhm_match = next(iter(lhm_drives.items()))
+                # Update model from LHM since Windows metadata lacks it
+                entry["model"] = lhm_name
+
+            if lhm_match:
                 for key in [
                     "temp_c",
                     "read_activity_pct",
@@ -319,8 +479,8 @@ class MetricsCollector:
                     "total_read_b",
                     "total_write_b",
                 ]:
-                    if key in lhm_drives[name] and lhm_drives[name][key] is not None:
-                        entry[key] = lhm_drives[name][key]
+                    if key in lhm_match and lhm_match[key] is not None:
+                        entry[key] = lhm_match[key]
 
             drives.append(entry)
 
@@ -414,8 +574,10 @@ class MetricsCollector:
     def _collect_services(self) -> list[dict[str, Any]]:
         if not self.health.services:
             return []
+        if platform.system().lower() == "windows":
+            return self._collect_services_windows()
         if platform.system().lower() != "linux":
-            self.logger.debug("Service checks only supported on Linux/systemd.")
+            self.logger.debug("Service checks only supported on Linux/systemd and Windows.")
             return []
         services: list[dict[str, Any]] = []
         for service in self.health.services:
@@ -459,6 +621,124 @@ class MetricsCollector:
                 }
             )
         return services
+
+    def _collect_services_windows(self) -> list[dict[str, Any]]:
+        """Collect Windows service status."""
+        if not self.health.services:
+            return []
+
+        # Query all requested services in one call
+        service_names = ",".join(f'"{s}"' for s in self.health.services)
+        result = self._run_command(
+            ["powershell", "-Command",
+             f"Get-Service -Name {service_names} -ErrorAction SilentlyContinue | "
+             "Select-Object Name, Status, StartType | ConvertTo-Json"],
+            stderr=subprocess.DEVNULL,
+        )
+
+        services: list[dict[str, Any]] = []
+        found_services: set[str] = set()
+
+        if result:
+            try:
+                data = json.loads(result)
+                if isinstance(data, dict):
+                    data = [data]
+                for svc in data:
+                    name = svc.get("Name")
+                    if not name:
+                        continue
+                    found_services.add(name.lower())
+                    # Status: 1=Stopped, 2=StartPending, 3=StopPending, 4=Running,
+                    # 5=ContinuePending, 6=PausePending, 7=Paused
+                    status_code = svc.get("Status", 0)
+                    status_map = {
+                        1: "inactive",
+                        2: "activating",
+                        3: "deactivating",
+                        4: "active",
+                        5: "activating",
+                        6: "deactivating",
+                        7: "inactive",
+                    }
+                    status = status_map.get(status_code, "failed")
+                    ok = status_code == 4  # Running
+                    entry: dict[str, Any] = {
+                        "name": name,
+                        "ok": ok,
+                        "status": status,
+                    }
+                    if not ok:
+                        entry["detail"] = f"Status code: {status_code}"
+                    # StartType: 0=Boot, 1=System, 2=Automatic, 3=Manual, 4=Disabled
+                    start_type = svc.get("StartType", 0)
+                    if start_type == 4:
+                        entry["loaded"] = "masked"
+                    else:
+                        entry["loaded"] = "loaded"
+                    services.append(entry)
+            except json.JSONDecodeError:
+                self.logger.debug("Failed to parse Windows service data.")
+
+        # Add entries for services that weren't found
+        for service in self.health.services:
+            if service.lower() not in found_services:
+                services.append({
+                    "name": service,
+                    "ok": False,
+                    "status": "failed",
+                    "detail": "Service not found",
+                    "loaded": "not-found",
+                })
+
+        return services
+
+    def _collect_updates(self) -> dict[str, Any] | None:
+        """Collect pending software updates."""
+        if platform.system().lower() == "windows":
+            return self._collect_updates_windows()
+        # Linux update checking could be added here (apt, dnf, etc.)
+        return None
+
+    def _collect_updates_windows(self) -> dict[str, Any] | None:
+        """Collect pending Windows Updates using COM API."""
+        result = self._run_command(
+            ["powershell", "-Command",
+             "$UpdateSession = New-Object -ComObject Microsoft.Update.Session; "
+             "$UpdateSearcher = $UpdateSession.CreateUpdateSearcher(); "
+             "try { $Updates = $UpdateSearcher.Search('IsInstalled=0').Updates; "
+             "$Updates | Select-Object Title, @{N='KB';E={($_.KBArticleIDs | Select-Object -First 1)}} "
+             "| ConvertTo-Json -Compress } catch { '[]' }"],
+            stderr=subprocess.DEVNULL,
+        )
+        if not result:
+            return None
+
+        try:
+            data = json.loads(result)
+            if isinstance(data, dict):
+                data = [data]
+            if not data:
+                return None
+
+            items: list[dict[str, Any]] = []
+            for update in data:
+                title = update.get("Title")
+                if title:
+                    entry: dict[str, Any] = {"name": title}
+                    kb = update.get("KB")
+                    if kb:
+                        entry["version"] = f"KB{kb}"
+                    items.append(entry)
+
+            return {
+                "source": "windows_update",
+                "pending": len(items),
+                "items": items[:20],  # Limit to 20 items to avoid huge payloads
+            }
+        except json.JSONDecodeError:
+            self.logger.debug("Failed to parse Windows Update data.")
+            return None
 
     def _collect_containers(self) -> list[dict[str, Any]]:
         if not self.health.containers:
@@ -624,21 +904,320 @@ class MetricsCollector:
         return metadata
 
     def _drive_metadata_windows(self) -> dict[str, dict[str, Any]]:
-        """Create basic drive metadata on Windows from IO stats."""
+        """Create drive metadata on Windows from WMI and PowerShell."""
         io_stats = psutil.disk_io_counters(perdisk=True)
         if not io_stats:
             return {}
 
         metadata: dict[str, dict[str, Any]] = {}
+
+        # Get detailed drive info from WMI
+        wmi_drives: dict[int, dict[str, Any]] = {}
+        result = self._run_command(
+            ["powershell", "-Command",
+             "Get-WmiObject Win32_DiskDrive | Select-Object DeviceID, Index, "
+             "SerialNumber, FirmwareRevision, Model, Manufacturer, Size, MediaType | ConvertTo-Json"],
+            stderr=subprocess.DEVNULL,
+        )
+        if result:
+            try:
+                data = json.loads(result)
+                if isinstance(data, dict):
+                    data = [data]
+                for drive in data:
+                    index = drive.get("Index")
+                    if index is not None:
+                        media = (drive.get("MediaType") or "").lower()
+                        drive_type = "HDD"
+                        if "ssd" in media or "solid" in media:
+                            drive_type = "SSD"
+                        elif "removable" in media:
+                            drive_type = "Removable"
+                        wmi_drives[index] = {
+                            "model": drive.get("Model") or "unknown",
+                            "manufacturer": drive.get("Manufacturer") or "unknown",
+                            "serial": (drive.get("SerialNumber") or "").strip() or None,
+                            "firmware": (drive.get("FirmwareRevision") or "").strip() or None,
+                            "listed_cap_b": drive.get("Size"),
+                            "type": drive_type,
+                        }
+            except json.JSONDecodeError:
+                self.logger.debug("Failed to parse WMI drive data.")
+
+        # Get partition info from PowerShell
+        partitions_by_disk: dict[int, list[dict[str, Any]]] = {}
+        result = self._run_command(
+            ["powershell", "-Command",
+             "Get-Partition | Select-Object DiskNumber, PartitionNumber, DriveLetter, "
+             "Size, Type, GptType | ConvertTo-Json"],
+            stderr=subprocess.DEVNULL,
+        )
+        if result:
+            try:
+                data = json.loads(result)
+                if isinstance(data, dict):
+                    data = [data]
+                for part in data:
+                    disk_num = part.get("DiskNumber")
+                    if disk_num is None:
+                        continue
+                    part_entry: dict[str, Any] = {
+                        "name": f"Disk {disk_num} Partition {part.get('PartitionNumber', 0)}",
+                    }
+                    if part.get("PartitionNumber"):
+                        part_entry["number"] = part["PartitionNumber"]
+                    if part.get("DriveLetter"):
+                        part_entry["label"] = f"{part['DriveLetter']}:"
+                    if part.get("Size"):
+                        part_entry["size_b"] = part["Size"]
+                    if part.get("GptType"):
+                        part_entry["type_guid"] = part["GptType"]
+                    part_type = (part.get("Type") or "").lower()
+                    if "system" in part_type:
+                        part_entry["content"] = "filesystem"
+                    elif "recovery" in part_type:
+                        part_entry["content"] = "filesystem"
+                    elif "reserved" in part_type:
+                        part_entry["content"] = "unknown"
+                    else:
+                        part_entry["content"] = "filesystem"
+                    part_entry["source"] = "powershell"
+                    partitions_by_disk.setdefault(disk_num, []).append(part_entry)
+            except json.JSONDecodeError:
+                self.logger.debug("Failed to parse partition data.")
+
+        # Get disk health status from Get-PhysicalDisk
+        disk_health: dict[int, dict[str, Any]] = {}
+        result = self._run_command(
+            ["powershell", "-Command",
+             "Get-PhysicalDisk | Select-Object DeviceId, FriendlyName, MediaType, "
+             "HealthStatus, OperationalStatus, SpindleSpeed | ConvertTo-Json"],
+            stderr=subprocess.DEVNULL,
+        )
+        if result:
+            try:
+                data = json.loads(result)
+                if isinstance(data, dict):
+                    data = [data]
+                for disk in data:
+                    dev_id = disk.get("DeviceId")
+                    if dev_id is not None:
+                        try:
+                            disk_num = int(dev_id)
+                        except (ValueError, TypeError):
+                            continue
+                        health_status = disk.get("HealthStatus") or "Unknown"
+                        op_status = disk.get("OperationalStatus") or "Unknown"
+                        # Determine drive type from MediaType or SpindleSpeed
+                        media_type = (disk.get("MediaType") or "").strip()
+                        spindle = disk.get("SpindleSpeed")
+                        if media_type == "SSD" or spindle == 0:
+                            drive_type = "SSD"
+                        elif media_type == "HDD" or (spindle and spindle > 0):
+                            drive_type = "HDD"
+                        else:
+                            drive_type = None  # Keep existing type
+
+                        smart: dict[str, Any] = {
+                            "overall_health": "PASSED" if health_status == "Healthy" else health_status,
+                        }
+                        if op_status != "OK":
+                            smart["operational_status"] = op_status
+
+                        disk_health[disk_num] = {
+                            "smart": smart,
+                            "drive_type": drive_type,
+                        }
+            except json.JSONDecodeError:
+                self.logger.debug("Failed to parse disk health data.")
+
+        # Try to get detailed SMART counters (requires admin)
+        result = self._run_command(
+            ["powershell", "-Command",
+             "Get-PhysicalDisk | Get-StorageReliabilityCounter | "
+             "Select-Object DeviceId, Temperature, Wear, ReadErrorsTotal, "
+             "WriteErrorsTotal, PowerOnHours | ConvertTo-Json"],
+            stderr=subprocess.DEVNULL,
+        )
+        if result:
+            try:
+                data = json.loads(result)
+                if isinstance(data, dict):
+                    data = [data]
+                for counter in data:
+                    dev_id = counter.get("DeviceId")
+                    if dev_id is not None:
+                        try:
+                            disk_num = int(dev_id)
+                        except (ValueError, TypeError):
+                            continue
+                        if disk_num in disk_health:
+                            smart = disk_health[disk_num]["smart"]
+                            if counter.get("Temperature"):
+                                smart["temperature_c"] = counter["Temperature"]
+                            if counter.get("Wear") is not None:
+                                # Wear is percentage used (0-100), convert to remaining
+                                smart["wear_leveling_pct"] = 100 - counter["Wear"]
+                            if counter.get("ReadErrorsTotal"):
+                                smart["read_errors"] = counter["ReadErrorsTotal"]
+                            if counter.get("WriteErrorsTotal"):
+                                smart["write_errors"] = counter["WriteErrorsTotal"]
+                            if counter.get("PowerOnHours"):
+                                smart["power_on_hours"] = counter["PowerOnHours"]
+            except json.JSONDecodeError:
+                self.logger.debug("Failed to parse storage reliability counters.")
+
+        # Build metadata for each drive
         for drive_name in io_stats.keys():
-            metadata[drive_name] = {
-                "manufacturer": "unknown",
-                "model": drive_name,
-                "type": "unknown",
-            }
+            # Extract disk number from name (e.g., "PhysicalDrive0" -> 0)
+            disk_num = None
+            if drive_name.startswith("PhysicalDrive"):
+                try:
+                    disk_num = int(drive_name[13:])
+                except ValueError:
+                    pass
+
+            if disk_num is not None and disk_num in wmi_drives:
+                wmi_info = wmi_drives[disk_num]
+                drive_type = wmi_info["type"]
+                # Prefer drive type from Get-PhysicalDisk (more reliable)
+                if disk_num in disk_health and disk_health[disk_num].get("drive_type"):
+                    drive_type = disk_health[disk_num]["drive_type"]
+                metadata[drive_name] = {
+                    "manufacturer": wmi_info["manufacturer"],
+                    "model": wmi_info["model"],
+                    "type": drive_type,
+                    "serial": wmi_info["serial"],
+                    "firmware": wmi_info["firmware"],
+                    "listed_cap_b": wmi_info["listed_cap_b"],
+                }
+                if disk_num in partitions_by_disk:
+                    metadata[drive_name]["partitions"] = partitions_by_disk[disk_num]
+                # Add SMART data if available
+                if disk_num in disk_health:
+                    metadata[drive_name]["smart"] = disk_health[disk_num]["smart"]
+            else:
+                metadata[drive_name] = {
+                    "manufacturer": "unknown",
+                    "model": drive_name,
+                    "type": "unknown",
+                }
 
         self.logger.debug("Created Windows drive metadata for %d drives", len(metadata))
         return metadata
+
+    def _windows_partition_map(self) -> dict[str, int]:
+        """Map drive letters to physical disk numbers on Windows."""
+        result = self._run_command(
+            ["powershell", "-Command",
+             "Get-Partition | Select-Object DriveLetter, DiskNumber | ConvertTo-Json"],
+            stderr=subprocess.DEVNULL,
+        )
+        if not result:
+            return {}
+        try:
+            data = json.loads(result)
+            # Ensure it's a list (single result comes as dict)
+            if isinstance(data, dict):
+                data = [data]
+            mapping: dict[str, int] = {}
+            for entry in data:
+                letter = entry.get("DriveLetter")
+                disk_num = entry.get("DiskNumber")
+                if letter and disk_num is not None:
+                    mapping[f"{letter}:\\"] = disk_num
+            return mapping
+        except json.JSONDecodeError:
+            self.logger.debug("Failed to parse Windows partition mapping.")
+            return {}
+
+    def _windows_bitlocker_status(self, mountpoints: list[str]) -> dict[str, dict[str, Any]]:
+        """Get BitLocker encryption status for Windows volumes.
+
+        Uses Shell COM object to check BitLocker status without requiring admin rights.
+        BitLocker protection values:
+        - 0/null: Not encrypted or not BitLocker capable
+        - 1: BitLocker On (unlocked)
+        - 2: BitLocker Off
+        - 3: BitLocker suspended
+        - 6: BitLocker On (locked)
+        """
+        if not mountpoints:
+            return {}
+        # Build PowerShell command to check all mountpoints
+        drives_array = ", ".join(f'"{m}"' for m in mountpoints)
+        ps_script = (
+            f"$shell = New-Object -ComObject Shell.Application; "
+            f"@({drives_array}) | ForEach-Object {{ "
+            f"$ns = $shell.NameSpace($_); "
+            f"if ($ns) {{ $status = $ns.Self.ExtendedProperty('System.Volume.BitLockerProtection'); "
+            f"[PSCustomObject]@{{Drive=$_; BitLocker=$status}} }} }} | ConvertTo-Json"
+        )
+        result = self._run_command(
+            ["powershell", "-Command", ps_script],
+            stderr=subprocess.DEVNULL,
+        )
+        if not result:
+            return {}
+        try:
+            data = json.loads(result)
+            if isinstance(data, dict):
+                data = [data]
+            status: dict[str, dict[str, Any]] = {}
+            for entry in data:
+                mount = entry.get("Drive")
+                bitlocker_val = entry.get("BitLocker")
+                if not mount:
+                    continue
+                # Values 1, 3, 6 indicate BitLocker is present
+                # 1 = On (unlocked), 3 = Suspended, 6 = On (locked)
+                if bitlocker_val in (1, 3, 6):
+                    status[mount] = {"encrypted": True, "scheme": "bitlocker"}
+            return status
+        except json.JSONDecodeError:
+            self.logger.debug("Failed to parse BitLocker status.")
+            return {}
+
+    def _windows_volume_metadata(self) -> dict[str, dict[str, Any]]:
+        """Get volume metadata (label, uuid, fstype) from Windows."""
+        result = self._run_command(
+            ["powershell", "-Command",
+             "Get-Volume | Where-Object { $_.DriveLetter } | "
+             "Select-Object DriveLetter, FileSystemLabel, FileSystemType, UniqueId | ConvertTo-Json"],
+            stderr=subprocess.DEVNULL,
+        )
+        if not result:
+            return {}
+        try:
+            data = json.loads(result)
+            if isinstance(data, dict):
+                data = [data]
+            metadata: dict[str, dict[str, Any]] = {}
+            for vol in data:
+                letter = vol.get("DriveLetter")
+                if not letter:
+                    continue
+                mountpoint = f"{letter}:\\"
+                entry: dict[str, Any] = {}
+                if vol.get("FileSystemLabel"):
+                    entry["label"] = vol["FileSystemLabel"]
+                if vol.get("FileSystemType"):
+                    entry["fstype"] = vol["FileSystemType"]
+                if vol.get("UniqueId"):
+                    # Extract UUID from Windows format: \\?\Volume{uuid}\
+                    uid = vol["UniqueId"]
+                    if "{" in uid and "}" in uid:
+                        start = uid.index("{") + 1
+                        end = uid.index("}")
+                        entry["uuid"] = uid[start:end]
+                    else:
+                        entry["uuid"] = uid
+                if entry:
+                    metadata[mountpoint] = entry
+            return metadata
+        except json.JSONDecodeError:
+            self.logger.debug("Failed to parse Windows volume metadata.")
+            return {}
 
     def _parse_lsblk_partitions(self, children: list[dict[str, Any]]) -> list[dict[str, Any]]:
         partitions: list[dict[str, Any]] = []
@@ -797,6 +1376,10 @@ class MetricsCollector:
         dmi_board = self._collect_dmidecode()
         if dmi_board:
             motherboard.update(dmi_board)
+
+        wmi_board = self._collect_wmi_motherboard()
+        if wmi_board:
+            motherboard.update(wmi_board)
 
         return motherboard if motherboard else None
 
@@ -984,6 +1567,53 @@ class MetricsCollector:
             motherboard["bios_date"] = bios_date
         return motherboard if motherboard else None
 
+    def _collect_wmi_motherboard(self) -> dict[str, Any] | None:
+        """Get motherboard and BIOS info from WMI on Windows."""
+        if platform.system().lower() != "windows":
+            return None
+
+        motherboard: dict[str, Any] = {}
+
+        # Get baseboard info
+        result = self._run_command(
+            ["powershell", "-Command",
+             "Get-WmiObject Win32_BaseBoard | Select-Object Manufacturer, Product | ConvertTo-Json"],
+            stderr=subprocess.DEVNULL,
+        )
+        if result:
+            try:
+                data = json.loads(result)
+                if data.get("Manufacturer"):
+                    motherboard["manufacturer"] = data["Manufacturer"]
+                if data.get("Product"):
+                    motherboard["name"] = data["Product"]
+            except json.JSONDecodeError:
+                pass
+
+        # Get BIOS info
+        result = self._run_command(
+            ["powershell", "-Command",
+             "Get-WmiObject Win32_BIOS | Select-Object SMBIOSBIOSVersion, ReleaseDate | ConvertTo-Json"],
+            stderr=subprocess.DEVNULL,
+        )
+        if result:
+            try:
+                data = json.loads(result)
+                if data.get("SMBIOSBIOSVersion"):
+                    motherboard["bios_version"] = data["SMBIOSBIOSVersion"]
+                if data.get("ReleaseDate"):
+                    # Parse WMI date format: 20250917000000.000000+000
+                    raw_date = data["ReleaseDate"]
+                    if raw_date and len(raw_date) >= 8:
+                        try:
+                            motherboard["bios_date"] = f"{raw_date[4:6]}/{raw_date[6:8]}/{raw_date[0:4]}"
+                        except (IndexError, ValueError):
+                            pass
+            except json.JSONDecodeError:
+                pass
+
+        return motherboard if motherboard else None
+
     def _collect_lhm_gpus(self) -> list[dict[str, Any]]:
         data = self._read_lhm()
         if not data:
@@ -1024,6 +1654,53 @@ class MetricsCollector:
                 entry["soc"] = soc_entry
             if device.get("temp_c") is not None:
                 entry["temp_c"] = device["temp_c"]
+
+            # Add memory info
+            memory_entry: dict[str, Any] = {}
+            if device.get("mem_clock_hz") is not None:
+                memory_entry["clock_hz"] = device["mem_clock_hz"]
+
+            # Build memory types array from different memory regions
+            mem_types: list[dict[str, Any]] = []
+
+            # Dedicated/main GPU memory
+            if device.get("memory"):
+                mem = device["memory"]
+                mem_type: dict[str, Any] = {"name": "GPU Memory"}
+                if "used_b" in mem:
+                    mem_type["used_b"] = mem["used_b"]
+                if "available_b" in mem:
+                    mem_type["available_b"] = mem["available_b"]
+                elif "total_b" in mem and "used_b" in mem:
+                    mem_type["available_b"] = mem["total_b"] - mem["used_b"]
+                if "total_b" in mem:
+                    mem_type["total_b"] = mem["total_b"]
+                if "used_b" in mem_type and "available_b" in mem_type:
+                    mem_types.append(mem_type)
+
+            # Shared system memory
+            if device.get("memory_shared"):
+                mem = device["memory_shared"]
+                mem_type = {"name": "Shared Memory"}
+                if "used_b" in mem:
+                    mem_type["used_b"] = mem["used_b"]
+                    mem_type["available_b"] = 0  # Shared memory is dynamically allocated
+                    mem_types.append(mem_type)
+
+            # D3D dedicated memory
+            if device.get("memory_d3d"):
+                mem = device["memory_d3d"]
+                mem_type = {"name": "D3D Dedicated"}
+                if "used_b" in mem:
+                    mem_type["used_b"] = mem["used_b"]
+                    mem_type["available_b"] = 0
+                    mem_types.append(mem_type)
+
+            if mem_types:
+                memory_entry["types"] = mem_types
+            if memory_entry:
+                entry["memory"] = memory_entry
+
             gpus.append(entry)
         return gpus
 
@@ -1256,16 +1933,30 @@ class MetricsCollector:
 
         parsed_drives: dict[str, dict[str, Any]] = {}
         for name, sensors in drive_sensors.items():
-            temp = next(
-                (
-                    sensor["value"]
-                    for sensor in sensors
-                    if sensor["category"] == "temperature"
-                ),
-                None,
-            )
-            if temp is not None:
-                parsed_drives[name] = {"temp_c": float(temp)}
+            drive: dict[str, Any] = {}
+            for sensor in sensors:
+                category = sensor["category"]
+                label = sensor["name"].lower()
+                value = sensor["value"]
+                if category == "temperature":
+                    drive["temp_c"] = float(value)
+                elif category == "load":
+                    if "read activity" in label:
+                        drive["read_activity_pct"] = float(value)
+                    elif "write activity" in label:
+                        drive["write_activity_pct"] = float(value)
+                elif category == "throughput":
+                    if "read rate" in label:
+                        drive["read_rate_bps"] = int(value)
+                    elif "write rate" in label:
+                        drive["write_rate_bps"] = int(value)
+                elif category == "data":
+                    if "data read" in label:
+                        drive["total_read_b"] = int(value)
+                    elif "data written" in label:
+                        drive["total_write_b"] = int(value)
+            if drive:
+                parsed_drives[name] = drive
 
         return {
             "motherboard_sensors": motherboard_sensors,
@@ -1350,6 +2041,8 @@ class MetricsCollector:
                 return "gpu"
             if "mainboard" in lowered or "motherboard" in lowered:
                 return "motherboard"
+            if "cpu" in lowered:
+                return "cpu"
             return None
 
         cpu_entry: dict[str, Any] = {"cores": {}}
@@ -1438,10 +2131,31 @@ class MetricsCollector:
                             gpu["soc_clock_hz"] = float(value) * 1e6
                         elif "memory" in label:
                             gpu["mem_clock_hz"] = float(value) * 1e6
+                    elif sensor_type == "smalldata":
+                        # GPU memory usage - LHM reports in MB or GB
+                        # Try to determine if it's used or total based on label
+                        if "used" in label or "gpu memory" in label:
+                            # LHM reports in MB, convert to bytes
+                            gpu.setdefault("memory", {})["used_b"] = int(value * 1024 * 1024)
+                        elif "free" in label or "available" in label:
+                            gpu.setdefault("memory", {})["available_b"] = int(value * 1024 * 1024)
+                        elif "total" in label:
+                            gpu.setdefault("memory", {})["total_b"] = int(value * 1024 * 1024)
+                        elif "shared" in label:
+                            gpu.setdefault("memory_shared", {})["used_b"] = int(value * 1024 * 1024)
+                        elif "d3d" in label:
+                            # D3D dedicated memory
+                            gpu.setdefault("memory_d3d", {})["used_b"] = int(value * 1024 * 1024)
                 if value is not None and next_type == "cpu":
                     label = node_text.lower()
-                    if sensor_type == "temperature" and "tctl" in label:
-                        cpu_entry["temp_c"] = float(value)
+                    if sensor_type == "temperature":
+                        # Handle various CPU temperature sensor names
+                        if any(t in label for t in ["tctl", "tdie", "cpu temp", "package", "core temp"]):
+                            cpu_entry["temp_c"] = float(value)
+                        elif "core #" in label:
+                            core_index = self._parse_core_index(label)
+                            if core_index is not None:
+                                cpu_entry["cores"].setdefault(core_index, {})["temp_c"] = float(value)
                     elif sensor_type == "voltage":
                         if "core (svi2" in label:
                             cpu_entry["voltage_core_v"] = float(value)
@@ -1453,18 +2167,22 @@ class MetricsCollector:
                                 cpu_entry["cores"].setdefault(core_index, {})[
                                     "voltage_v"
                                 ] = float(value)
-                    elif sensor_type == "power" and "core #" in label:
-                        core_index = self._parse_core_index(label)
-                        if core_index is not None:
-                            cpu_entry["cores"].setdefault(core_index, {})[
-                                "power_w"
-                            ] = float(value)
-                    elif sensor_type == "clock" and "core #" in label:
-                        core_index = self._parse_core_index(label)
-                        if core_index is not None:
-                            cpu_entry["cores"].setdefault(core_index, {})[
-                                "clock_hz"
-                            ] = float(value) * 1e6
+                    elif sensor_type == "power":
+                        if "core #" in label:
+                            core_index = self._parse_core_index(label)
+                            if core_index is not None:
+                                cpu_entry["cores"].setdefault(core_index, {})[
+                                    "power_w"
+                                ] = float(value)
+                        elif any(t in label for t in ["package", "cpu package", "total"]):
+                            cpu_entry["power_w"] = float(value)
+                    elif sensor_type == "clock":
+                        if "core #" in label:
+                            core_index = self._parse_core_index(label)
+                            if core_index is not None:
+                                cpu_entry["cores"].setdefault(core_index, {})[
+                                    "clock_hz"
+                                ] = float(value) * 1e6
                     elif sensor_type == "factor" and "core #" in label:
                         core_index = self._parse_core_index(label)
                         if core_index is not None:
@@ -1561,7 +2279,7 @@ class MetricsCollector:
             parsed_gpus.append(gpu_entry)
 
         parsed_cpu = None
-        if cpu_entry.get("temp_c") or cpu_entry.get("voltage_core_v") or cpu_entry["cores"]:
+        if cpu_entry.get("temp_c") or cpu_entry.get("voltage_core_v") or cpu_entry.get("power_w") or cpu_entry["cores"]:
             parsed_cpu = cpu_entry
 
         return {

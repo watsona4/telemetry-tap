@@ -362,16 +362,15 @@ class MetricsCollector:
 
     def _collect_batteries(self) -> list[dict[str, Any]]:
         batteries: list[dict[str, Any]] = []
+        psutil_battery: dict[str, Any] | None = None
         if hasattr(psutil, "sensors_battery"):
             battery = psutil.sensors_battery()
             if battery is not None:
-                batteries.append(
-                    {
-                        "name": "Battery",
-                        "discharging": battery.power_plugged is False,
-                        "charge_level_pct": float(battery.percent),
-                    }
-                )
+                psutil_battery = {
+                    "name": "Battery",
+                    "discharging": battery.power_plugged is False,
+                    "charge_level_pct": float(battery.percent),
+                }
             else:
                 self.logger.debug("No battery data available from psutil.")
         else:
@@ -379,10 +378,15 @@ class MetricsCollector:
 
         lhm_data = self._read_lhm()
         lhm_batteries = self._collect_lhm_batteries(lhm_data)
-        existing_names = {battery["name"] for battery in batteries}
-        for battery in lhm_batteries:
-            if battery["name"] not in existing_names:
-                batteries.append(battery)
+        if psutil_battery and lhm_batteries:
+            lhm_primary = lhm_batteries[0].copy()
+            lhm_primary["discharging"] = psutil_battery["discharging"]
+            lhm_primary["charge_level_pct"] = psutil_battery["charge_level_pct"]
+            batteries.append(lhm_primary)
+        elif psutil_battery:
+            batteries.append(psutil_battery)
+        else:
+            batteries.extend(lhm_batteries)
 
         return batteries
 

@@ -60,3 +60,11 @@ librehardwaremonitor_url = http://localhost:8085/data.json
 LibreHardwareMonitor must expose its JSON endpoint (default is `http://localhost:8085/data.json`). On Linux, `lsblk`, `smartctl`, `sensors`, and `dmidecode` are used when present to enrich drive metadata, SMART stats, and motherboard details.
 
 Home Assistant discovery is published to the configured `discovery_topic` with a single sensor that exposes the full payload as attributes and reports host uptime as its state.
+
+### Health checks
+```ini
+[health]
+services = ssh, mosquitto
+containers = homeassistant
+```
+Use `services` to list systemd services to watch on Linux, and `containers` to list Docker container names to watch.

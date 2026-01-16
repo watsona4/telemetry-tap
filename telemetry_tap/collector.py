@@ -14,7 +14,7 @@ from urllib.request import urlopen
 
 import psutil
 
-from telemetry_tap.config import CollectorConfig
+from telemetry_tap.config import CollectorConfig, HealthConfig
 from telemetry_tap.logging_utils import TRACE_LEVEL
 
 SCHEMA_NAME = "hwmon-exporter"
@@ -41,8 +41,9 @@ class MetricsState:
 
 
 class MetricsCollector:
-    def __init__(self, config: CollectorConfig) -> None:
+    def __init__(self, config: CollectorConfig, health: HealthConfig) -> None:
         self.config = config
+        self.health = health
         self.state = MetricsState()
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -97,17 +98,39 @@ class MetricsCollector:
 
     def _collect_health(self) -> dict[str, Any]:
         issues: list[str] = []
-        drive_health = self._drive_health_issues()
-        issues.extend(drive_health)
+        issues.extend(self._drive_health_issues())
+        issues.extend(self._threshold_issues())
+        services = self._collect_services()
+        containers = self._collect_containers()
+        if services:
+            for service in services:
+                if not service["ok"]:
+                    issues.append(f"Service {service['name']} status {service['status']}")
+        if containers:
+            for container in containers:
+                if not container["ok"]:
+                    issues.append(
+                        f"Container {container['name']} status {container['status']}"
+                    )
+        summary = "ok" if not issues else f"issues: {'; '.join(issues)}"
+        issues_with_summary = [summary] + issues if issues else [summary]
         if issues:
-            self.logger.warning("Health issues detected: %s", issues)
-        return {"overall_ok": not issues, "issues": issues}
+            self.logger.warning("Health issues detected: %s", issues_with_summary)
+        health: dict[str, Any] = {
+            "overall_ok": not issues,
+            "issues": issues_with_summary,
+        }
+        if services:
+            health["services"] = services
+        if containers:
+            health["containers"] = containers
+        return health
 
     def _collect_cpus(self) -> list[dict[str, Any]]:
         per_cpu = psutil.cpu_percent(interval=None, percpu=True)
         logical_count = len(per_cpu)
         physical_count = psutil.cpu_count(logical=False) or logical_count
-        num_cores = physical_count
+        num_physical_cores = physical_count
         cores: list[dict[str, Any]] = []
         if physical_count and physical_count < logical_count:
             base = logical_count // physical_count
@@ -138,7 +161,8 @@ class MetricsCollector:
 
         cpu_entry: dict[str, Any] = {
             "name": "CPU",
-            "num_cores": num_cores,
+            "num_physical_cores": num_physical_cores,
+            "num_logical_cores": logical_count,
             "load_pct": float(psutil.cpu_percent(interval=None)),
             "cores": cores,
         }
@@ -353,6 +377,140 @@ class MetricsCollector:
         self.state.last_net = NetSnapshot(timestamp=now, values=io_stats)
         return ifaces
 
+    def _threshold_issues(self) -> list[str]:
+        issues: list[str] = []
+        cpu_pct = psutil.cpu_percent(interval=None)
+        if cpu_pct > 90:
+            issues.append(f"High CPU utilization {cpu_pct:.1f}%")
+        mem = psutil.virtual_memory()
+        if mem.percent > 90:
+            issues.append(f"High memory utilization {mem.percent:.1f}%")
+        swap = psutil.swap_memory()
+        if swap and swap.percent > 90:
+            issues.append(f"High swap utilization {swap.percent:.1f}%")
+        for part in psutil.disk_partitions(all=False):
+            try:
+                usage = psutil.disk_usage(part.mountpoint)
+            except OSError:
+                continue
+            pct = (usage.used / usage.total) * 100 if usage.total else 0
+            if pct > 90:
+                issues.append(f"Low disk space on {part.mountpoint} ({pct:.1f}%)")
+        return issues
+
+    def _collect_services(self) -> list[dict[str, Any]]:
+        if not self.health.services:
+            return []
+        if platform.system().lower() != "linux":
+            self.logger.debug("Service checks only supported on Linux/systemd.")
+            return []
+        services: list[dict[str, Any]] = []
+        for service in self.health.services:
+            output = self._run_command(
+                [
+                    "systemctl",
+                    "show",
+                    service,
+                    "--no-page",
+                    "--property=ActiveState,SubState,LoadState",
+                ]
+            )
+            if output is None:
+                services.append(
+                    {
+                        "name": service,
+                        "ok": False,
+                        "status": "failed",
+                        "detail": "systemctl unavailable or failed",
+                        "loaded": "error",
+                    }
+                )
+                continue
+            fields = dict(
+                line.split("=", 1)
+                for line in output.splitlines()
+                if "=" in line
+            )
+            active = fields.get("ActiveState", "unknown")
+            sub = fields.get("SubState", "unknown")
+            loaded = fields.get("LoadState", "unknown")
+            status = active if active in {"active", "inactive", "failed"} else sub
+            ok = active == "active"
+            services.append(
+                {
+                    "name": service,
+                    "ok": ok,
+                    "status": status,
+                    "loaded": loaded,
+                    "detail": None if ok else f"{active}/{sub}",
+                }
+            )
+        return services
+
+    def _collect_containers(self) -> list[dict[str, Any]]:
+        if not self.health.containers:
+            return []
+        output = self._run_command(
+            [
+                "docker",
+                "ps",
+                "-a",
+                "--format",
+                "{{.Names}}||{{.Status}}||{{.Image}}",
+            ]
+        )
+        if output is None:
+            self.logger.debug("Docker not available for container checks.")
+            return [
+                {
+                    "name": name,
+                    "ok": False,
+                    "status": "unknown",
+                    "detail": "docker not available",
+                }
+                for name in self.health.containers
+            ]
+        status_map = {}
+        for line in output.splitlines():
+            name, status, image = (part.strip() for part in line.split("||"))
+            status_map[name] = {"status": status, "image": image}
+        containers: list[dict[str, Any]] = []
+        for name in self.health.containers:
+            info = status_map.get(name)
+            if not info:
+                containers.append(
+                    {
+                        "name": name,
+                        "ok": False,
+                        "status": "exited",
+                        "detail": "not found",
+                    }
+                )
+                continue
+            status_raw = info["status"]
+            status_lower = status_raw.lower()
+            if status_lower.startswith("up"):
+                status = "running"
+                ok = "unhealthy" not in status_lower
+                if "healthy" in status_lower:
+                    status = "healthy"
+            elif status_lower.startswith("exited"):
+                status = "exited"
+                ok = False
+            else:
+                status = "unknown"
+                ok = False
+            containers.append(
+                {
+                    "name": name,
+                    "ok": ok,
+                    "status": status,
+                    "image": info.get("image"),
+                    "detail": status_raw,
+                }
+            )
+        return containers
+
     @staticmethod
     def _parse_core_index(label: str) -> int | None:
         for part in label.replace("#", " ").split():
@@ -555,6 +713,7 @@ class MetricsCollector:
         temps: list[dict[str, Any]] = []
         fans: list[dict[str, Any]] = []
         voltages: list[dict[str, Any]] = []
+        currents: list[dict[str, Any]] = []
         powers: list[dict[str, Any]] = []
 
         for sensor in data.get("motherboard_sensors", []):
@@ -571,6 +730,8 @@ class MetricsCollector:
                 voltages.append(
                     {"name": name, "voltage_v": value, "source": "lhm"}
                 )
+            elif category == "current":
+                currents.append({"name": name, "current_a": value, "source": "lhm"})
             elif category == "power":
                 powers.append({"name": name, "power_w": value, "source": "lhm"})
 
@@ -580,6 +741,8 @@ class MetricsCollector:
             motherboard["fans"] = fans
         if voltages:
             motherboard["voltages"] = voltages
+        if currents:
+            motherboard["currents"] = currents
         if powers:
             motherboard["powers"] = powers
 
@@ -739,6 +902,21 @@ class MetricsCollector:
             if not engines:
                 engines = [{"name": "Core", "load_pct": core["load_pct"]}]
             entry: dict[str, Any] = {"name": name, "core": core, "engines": engines}
+            if device.get("core_voltage_v") is not None:
+                entry["core"]["voltage_v"] = device["core_voltage_v"]
+            if device.get("core_power_w") is not None:
+                entry["core"]["power_w"] = device["core_power_w"]
+            if device.get("core_clock_hz") is not None:
+                entry["core"]["clock_hz"] = device["core_clock_hz"]
+            soc_entry: dict[str, Any] = {}
+            if device.get("soc_voltage_v") is not None:
+                soc_entry["voltage_v"] = device["soc_voltage_v"]
+            if device.get("soc_power_w") is not None:
+                soc_entry["power_w"] = device["soc_power_w"]
+            if device.get("soc_clock_hz") is not None:
+                soc_entry["clock_hz"] = device["soc_clock_hz"]
+            if soc_entry:
+                entry["soc"] = soc_entry
             if device.get("temp_c") is not None:
                 entry["temp_c"] = device["temp_c"]
             gpus.append(entry)
@@ -1071,6 +1249,7 @@ class MetricsCollector:
 
         cpu_entry: dict[str, Any] = {"cores": {}}
         motherboard_info: dict[str, Any] = {}
+        motherboard_sensors: list[dict[str, Any]] = []
 
         def walk(node: dict[str, Any], hw_type: str | None, hw_name: str | None) -> None:
             image_url = node.get("ImageURL") or ""
@@ -1187,6 +1366,22 @@ class MetricsCollector:
                             cpu_entry["cores"].setdefault(core_index, {})[
                                 "factor"
                             ] = float(value)
+                if value is not None and next_type == "motherboard":
+                    sensor_category = sensor_type
+                    if sensor_category in {
+                        "temperature",
+                        "fan",
+                        "voltage",
+                        "power",
+                        "current",
+                    }:
+                        motherboard_sensors.append(
+                            {
+                                "category": sensor_category,
+                                "name": node_text,
+                                "value": float(value),
+                            }
+                        )
 
             for child in node.get("Children", []):
                 if isinstance(child, dict):
@@ -1265,7 +1460,7 @@ class MetricsCollector:
             parsed_cpu = cpu_entry
 
         return {
-            "motherboard_sensors": [],
+            "motherboard_sensors": motherboard_sensors,
             "gpus": parsed_gpus,
             "batteries": batteries,
             "drives": drive_map,

@@ -58,7 +58,7 @@ def main() -> None:
     config = load_config(args.config)
     pretty_print = level <= logging.DEBUG
 
-    collector = MetricsCollector(config.collector)
+    collector = MetricsCollector(config.collector, config.health)
     publisher = MqttPublisher(config.mqtt)
     if not args.dry_run:
         publisher.connect()

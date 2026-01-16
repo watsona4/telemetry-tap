@@ -35,10 +35,17 @@ class CollectorConfig:
 
 
 @dataclass(frozen=True)
+class HealthConfig:
+    services: list[str]
+    containers: list[str]
+
+
+@dataclass(frozen=True)
 class AppConfig:
     mqtt: MqttConfig
     publish: PublishConfig
     collector: CollectorConfig
+    health: HealthConfig
 
 
 def _get_optional(value: str | None) -> str | None:
@@ -46,6 +53,12 @@ def _get_optional(value: str | None) -> str | None:
         return None
     value = value.strip()
     return value if value else None
+
+
+def _get_list(value: str | None) -> list[str]:
+    if value is None:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -57,6 +70,7 @@ def load_config(path: str | Path) -> AppConfig:
     mqtt_section = parser["mqtt"]
     publish_section = parser["publish"]
     collector_section = parser["collector"] if "collector" in parser else {}
+    health_section = parser["health"] if "health" in parser else {}
 
     mqtt = MqttConfig(
         host=mqtt_section.get("host", "localhost"),
@@ -86,4 +100,9 @@ def load_config(path: str | Path) -> AppConfig:
         ),
     )
 
-    return AppConfig(mqtt=mqtt, publish=publish, collector=collector)
+    health = HealthConfig(
+        services=_get_list(health_section.get("services")),
+        containers=_get_list(health_section.get("containers")),
+    )
+
+    return AppConfig(mqtt=mqtt, publish=publish, collector=collector, health=health)

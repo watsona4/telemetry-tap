@@ -620,10 +620,15 @@
             "type": "number",
             "description": "CPU temperature in degrees Celsius, if available."
           },
-          "num_cores": {
+          "num_physical_cores": {
             "type": "integer",
             "minimum": 1,
             "description": "Number of CPU cores represented by this CPU entry."
+          },
+          "num_logical_cores": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Number of logical CPU cores (threads) represented by this CPU entry."
           },
           "cores": {
             "type": "array",
@@ -725,7 +730,8 @@
           }
         },
         "required": [
-          "num_cores",
+          "num_physical_cores",
+          "num_logical_cores",
           "load_pct",
           "name",
           "cores"

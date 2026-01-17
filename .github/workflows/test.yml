@@ -41,3 +41,41 @@ jobs:
           fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  test-arm:
+    name: Test on Linux ARM64 (QEMU)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Run tests in ARM64 container
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: .github/Dockerfile.arm64-test
+          platforms: linux/arm64
+          push: false
+
+  test-freebsd:
+    name: Test on FreeBSD
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run tests on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.0"
+          usesh: true
+          prepare: |
+            pkg install -y python311 py311-pip py311-sqlite3
+          run: |
+            python3.11 -m pip install --user -e ".[test]"
+            python3.11 -m pytest -v

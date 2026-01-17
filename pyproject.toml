@@ -19,10 +19,11 @@ classifiers = [
 ]
 
 dependencies = [
-  "psutil>=5.9.8",
+  "psutil>=5.9.4",
   "paho-mqtt>=1.6.1",
-  "jsonschema>=4.21.1",
-  "colorlog>=6.8.2",
+  "jsonschema>=4.10.3",
+  "colorlog>=6.7.0",
+  "rpds-py>=0.12.0",
 ]
 
 [project.scripts]

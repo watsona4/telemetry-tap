@@ -647,7 +647,12 @@ class MetricsCollector:
     def _collect_ifaces(self) -> list[dict[str, Any]]:
         addrs = psutil.net_if_addrs()
         io_stats = psutil.net_io_counters(pernic=True)
-        iface_stats = psutil.net_if_stats()
+        # net_if_stats() can fail with OSError in containers without proper network support
+        try:
+            iface_stats = psutil.net_if_stats()
+        except OSError:
+            self.logger.debug("Failed to get network interface stats (ioctl not supported).")
+            iface_stats = {}
         now = datetime.now(timezone.utc).timestamp()
         ifaces: list[dict[str, Any]] = []
 

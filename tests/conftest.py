@@ -13,5 +13,11 @@ def pytest_configure(config):
         "markers", "linux: mark test as Linux-specific"
     )
     config.addinivalue_line(
+        "markers", "freebsd: mark test as FreeBSD-specific"
+    )
+    config.addinivalue_line(
+        "markers", "opnsense: mark test as OPNsense-specific"
+    )
+    config.addinivalue_line(
         "markers", "integration: mark test as integration test"
     )

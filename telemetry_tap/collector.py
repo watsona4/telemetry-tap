@@ -144,6 +144,21 @@ class MetricsCollector:
             if time_server:
                 payload["time_server"] = time_server
 
+        # OPNsense/Zenarmor integration (FreeBSD only)
+        if self.config.enable_opnsense:
+            opnsense = self._collect_opnsense()
+            if opnsense:
+                payload["opnsense"] = opnsense
+
+            opnsense_plugins = self._collect_opnsense_plugins()
+            if opnsense_plugins:
+                payload["opnsense_plugins"] = opnsense_plugins
+
+        if self.config.enable_zenarmor:
+            zenarmor = self._collect_zenarmor()
+            if zenarmor:
+                payload["zenarmor"] = zenarmor
+
         self.logger.debug("Completed metrics payload collection.")
         return payload
 
@@ -344,6 +359,19 @@ class MetricsCollector:
             freq_scaling = self._collect_cpu_freq_scaling()
             if freq_scaling:
                 cpu_entry.update(freq_scaling)
+
+        # Add FreeBSD CPU temperatures via sysctl
+        if platform.system().lower() == "freebsd":
+            freebsd_temps = self._collect_cpu_temps_freebsd()
+            if freebsd_temps:
+                # Set overall CPU temp from first core
+                if 0 in freebsd_temps and "temp_c" not in cpu_entry:
+                    cpu_entry["temp_c"] = freebsd_temps[0]
+                # Add per-core temps
+                for core in cores:
+                    core_idx = int(core["name"].split()[-1])
+                    if core_idx in freebsd_temps:
+                        core["temp_c"] = freebsd_temps[core_idx]
 
         return [cpu_entry]
 
@@ -761,8 +789,10 @@ class MetricsCollector:
             return []
         if platform.system().lower() == "windows":
             return self._collect_services_windows()
+        if platform.system().lower() == "freebsd":
+            return self._collect_services_freebsd()
         if platform.system().lower() != "linux":
-            self.logger.debug("Service checks only supported on Linux/systemd and Windows.")
+            self.logger.debug("Service checks only supported on Linux/systemd, FreeBSD, and Windows.")
             return []
         services: list[dict[str, Any]] = []
         for service in self.health.services:
@@ -884,6 +914,8 @@ class MetricsCollector:
             return self._collect_updates_windows()
         elif platform.system().lower() == "linux":
             return self._collect_updates_linux()
+        elif platform.system().lower() == "freebsd":
+            return self._collect_updates_freebsd()
         return None
 
     def _collect_updates_linux(self) -> dict[str, Any] | None:
@@ -953,6 +985,322 @@ class MetricsCollector:
         except json.JSONDecodeError:
             self.logger.debug("Failed to parse Windows Update data.")
             return None
+
+    def _collect_services_freebsd(self) -> list[dict[str, Any]]:
+        """Collect FreeBSD service status using service or pluginctl command.
+
+        On OPNsense, many services are managed via pluginctl rather than the
+        standard FreeBSD service command. When enable_opnsense is true, we try
+        pluginctl first, then fall back to the service command.
+        """
+        if not self.health.services:
+            return []
+
+        services: list[dict[str, Any]] = []
+        for service_name in self.health.services:
+            is_running = False
+            checked_via = "service"
+
+            # On OPNsense, try pluginctl first for service status
+            if self.config.enable_opnsense:
+                try:
+                    result = subprocess.run(
+                        [self.config.pluginctl_path, service_name, "status"],
+                        capture_output=True,
+                        text=True,
+                    )
+                    # pluginctl returns 0 if service is running
+                    if result.returncode == 0:
+                        is_running = True
+                        checked_via = "pluginctl"
+                    elif "unknown" not in result.stderr.lower():
+                        # pluginctl recognized the service but it's not running
+                        checked_via = "pluginctl"
+                except FileNotFoundError:
+                    pass  # pluginctl not available, fall through to service
+
+            # Fall back to standard service command if pluginctl didn't confirm running
+            if not is_running and checked_via == "service":
+                try:
+                    result = subprocess.run(
+                        [self.config.service_path, service_name, "status"],
+                        capture_output=True,
+                        text=True,
+                    )
+                    is_running = result.returncode == 0
+                except FileNotFoundError:
+                    pass
+
+            status = "active" if is_running else "inactive"
+
+            entry: dict[str, Any] = {
+                "name": service_name,
+                "ok": is_running,
+                "status": status,
+                "loaded": "loaded",  # FreeBSD doesn't have systemd's loaded state
+            }
+            if not is_running:
+                entry["detail"] = f"checked via {checked_via}"
+            services.append(entry)
+
+        return services
+
+    def _collect_updates_freebsd(self) -> dict[str, Any] | None:
+        """Collect pending FreeBSD updates using pkg."""
+        # Check for available package updates
+        output = self._run_command(
+            [self.config.pkg_path, "version", "-vRL="],
+            stderr=subprocess.DEVNULL
+        )
+
+        updates: dict[str, Any] = {"source": "pkg"}
+        pending_items: list[dict[str, str]] = []
+        security_issues = 0
+
+        if output is not None:
+            # Parse pkg version output - lines with '<' indicate available updates
+            for line in output.strip().split("\n"):
+                if line and "<" in line:
+                    parts = line.split()
+                    if parts:
+                        pkg_name = parts[0]
+                        pending_items.append({"name": pkg_name})
+
+            updates["pending"] = len(pending_items)
+            if pending_items:
+                updates["items"] = pending_items[:20]  # Limit to 20 items
+
+        # Check for security vulnerabilities with pkg audit
+        audit_output = self._run_command(
+            [self.config.pkg_path, "audit", "-F"],
+            stderr=subprocess.DEVNULL
+        )
+        if audit_output is not None:
+            # Count lines that contain vulnerability info
+            vuln_lines = [l for l in audit_output.strip().split("\n")
+                         if l and "is vulnerable" in l.lower()]
+            security_issues = len(vuln_lines)
+
+        if security_issues > 0:
+            updates["security_issues"] = security_issues
+
+        if not output and not audit_output:
+            return None
+
+        if "pending" not in updates:
+            updates["pending"] = 0
+
+        return updates
+
+    def _is_freebsd(self) -> bool:
+        """Check if running on FreeBSD."""
+        return platform.system().lower() == "freebsd"
+
+    def _is_opnsense(self) -> bool:
+        """Check if running on OPNsense (FreeBSD-based firewall)."""
+        if not self._is_freebsd():
+            return False
+        # Check for opnsense-version command
+        result = subprocess.run(
+            ["opnsense-version", "-v"],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+
+    def _collect_opnsense(self) -> dict[str, Any] | None:
+        """Collect OPNsense system information."""
+        if not self.config.enable_opnsense or not self._is_freebsd():
+            return None
+
+        opnsense: dict[str, Any] = {}
+
+        # Get OPNsense version
+        version_output = self._run_command(["opnsense-version", "-v"])
+        if version_output:
+            opnsense["version"] = version_output.strip()
+
+        # Get system status via configctl
+        status_output = self._run_command(
+            [self.config.configctl_path, "system", "status"]
+        )
+        if status_output:
+            opnsense["status_raw"] = status_output.strip()
+
+        return opnsense if opnsense else None
+
+    def _collect_opnsense_plugins(self) -> list[dict[str, Any]] | None:
+        """Collect installed OPNsense plugins.
+
+        Uses pkg query to list installed packages matching the os-* pattern,
+        which are OPNsense plugins.
+        """
+        if not self.config.enable_opnsense or not self._is_freebsd():
+            return None
+
+        # List all installed os-* packages (OPNsense plugins)
+        # pkg query format: %n = name, %v = version
+        output = self._run_command(
+            [self.config.pkg_path, "query", "-g", "%n %v", "os-*"]
+        )
+        if not output:
+            return None
+
+        plugins: list[dict[str, Any]] = []
+        for line in output.strip().split("\n"):
+            if not line:
+                continue
+            parts = line.split(None, 1)  # Split on first whitespace
+            if parts:
+                plugin: dict[str, Any] = {"name": parts[0]}
+                if len(parts) > 1:
+                    plugin["version"] = parts[1]
+                plugins.append(plugin)
+
+        return plugins if plugins else None
+
+    def _collect_zenarmor(self) -> dict[str, Any] | None:
+        """Collect Zenarmor (Sensei) service status.
+
+        Based on actual CLI testing, zenarmorctl only exposes service status:
+        - zenarmorctl cloud status -> "senpai is running as pid XXXX"
+        - zenarmorctl engine status -> "eastpect is running as pid XXXX"
+        """
+        if not self.config.enable_zenarmor or not self._is_freebsd():
+            return None
+
+        zenarmor: dict[str, Any] = {}
+
+        # Check cloud connector (senpai) status
+        cloud_output = self._run_command(
+            [self.config.zenarmorctl_path, "cloud", "status"]
+        )
+        if cloud_output:
+            # Parse "senpai is running as pid XXXX" or "senpai is not running"
+            cloud_lower = cloud_output.lower()
+            zenarmor["cloud_running"] = "is running" in cloud_lower
+            # Extract PID if running
+            if zenarmor["cloud_running"] and "pid" in cloud_lower:
+                try:
+                    pid_str = cloud_output.split("pid")[-1].strip()
+                    zenarmor["cloud_pid"] = int(pid_str.split()[0])
+                except (ValueError, IndexError):
+                    pass
+        else:
+            zenarmor["cloud_running"] = False
+
+        # Check inspection engine (eastpect) status
+        engine_output = self._run_command(
+            [self.config.zenarmorctl_path, "engine", "status"]
+        )
+        if engine_output:
+            # Parse "eastpect is running as pid XXXX" or "eastpect is not running"
+            engine_lower = engine_output.lower()
+            zenarmor["engine_running"] = "is running" in engine_lower
+            # Extract PID if running
+            if zenarmor["engine_running"] and "pid" in engine_lower:
+                try:
+                    pid_str = engine_output.split("pid")[-1].strip()
+                    zenarmor["engine_pid"] = int(pid_str.split()[0])
+                except (ValueError, IndexError):
+                    pass
+        else:
+            zenarmor["engine_running"] = False
+
+        return zenarmor if zenarmor else None
+
+    def _collect_cpu_temps_freebsd(self) -> dict[int, float]:
+        """Collect CPU core temperatures on FreeBSD via sysctl.
+
+        Returns a dict mapping core index to temperature in Celsius.
+        """
+        temps: dict[int, float] = {}
+
+        # Try to get CPU temps from dev.cpu.N.temperature
+        output = self._run_command(
+            [self.config.sysctl_path, "-a"],
+            stderr=subprocess.DEVNULL
+        )
+        if not output:
+            return temps
+
+        for line in output.split("\n"):
+            # Look for dev.cpu.N.temperature: XXX.XC
+            if "dev.cpu." in line and ".temperature:" in line:
+                try:
+                    # Parse "dev.cpu.0.temperature: 45.0C"
+                    key, value = line.split(":", 1)
+                    core_num = int(key.split(".")[2])
+                    temp_str = value.strip().rstrip("CK")
+                    temp_val = float(temp_str)
+                    # Convert from Kelvin if > 200 (likely Kelvin)
+                    if temp_val > 200:
+                        temp_val = temp_val - 273.15
+                    temps[core_num] = temp_val
+                except (ValueError, IndexError):
+                    continue
+
+        return temps
+
+    def _collect_thermal_zones_freebsd(self) -> list[dict[str, Any]]:
+        """Collect thermal zone temperatures on FreeBSD via sysctl.
+
+        Returns a list of thermal zone entries with name and temp_c.
+        """
+        zones: list[dict[str, Any]] = []
+
+        output = self._run_command(
+            [self.config.sysctl_path, "-a"],
+            stderr=subprocess.DEVNULL
+        )
+        if not output:
+            return zones
+
+        for line in output.split("\n"):
+            # Look for hw.acpi.thermal.tzN.temperature
+            if "hw.acpi.thermal." in line and ".temperature:" in line:
+                try:
+                    key, value = line.split(":", 1)
+                    # Extract zone name like "tz0"
+                    parts = key.split(".")
+                    zone_name = parts[3] if len(parts) > 3 else "unknown"
+                    temp_str = value.strip().rstrip("CK")
+                    temp_val = float(temp_str)
+                    # Convert from Kelvin if > 200
+                    if temp_val > 200:
+                        temp_val = temp_val - 273.15
+                    zones.append({
+                        "name": zone_name,
+                        "temp_c": temp_val,
+                    })
+                except (ValueError, IndexError):
+                    continue
+
+        return zones
+
+    def _collect_freebsd_sensors(self) -> dict[str, Any] | None:
+        """Collect sensor data on FreeBSD.
+
+        Returns motherboard-compatible dict with temps from thermal zones.
+        """
+        if not self._is_freebsd():
+            return None
+
+        temps: list[dict[str, Any]] = []
+
+        # Collect thermal zone temperatures
+        zones = self._collect_thermal_zones_freebsd()
+        for zone in zones:
+            temps.append({
+                "name": zone["name"],
+                "temp_c": zone["temp_c"],
+                "source": "sysctl",
+            })
+
+        if not temps:
+            return None
+
+        return {"temps": temps}
 
     def _collect_containers(self) -> list[dict[str, Any]]:
         if not self.health.containers:
@@ -1657,6 +2005,10 @@ class MetricsCollector:
         sensors_board = self._collect_linux_sensors()
         if sensors_board:
             self._merge_motherboard(motherboard, sensors_board)
+
+        freebsd_sensors = self._collect_freebsd_sensors()
+        if freebsd_sensors:
+            self._merge_motherboard(motherboard, freebsd_sensors)
 
         # Try sysfs DMI first (no root required), then fall back to dmidecode
         sysfs_dmi = self._collect_sysfs_dmi()

@@ -1278,6 +1278,30 @@ class MetricsCollector:
 
         return zones
 
+    def _collect_freebsd_sensors(self) -> dict[str, Any] | None:
+        """Collect sensor data on FreeBSD.
+
+        Returns motherboard-compatible dict with temps from thermal zones.
+        """
+        if not self._is_freebsd():
+            return None
+
+        temps: list[dict[str, Any]] = []
+
+        # Collect thermal zone temperatures
+        zones = self._collect_thermal_zones_freebsd()
+        for zone in zones:
+            temps.append({
+                "name": zone["name"],
+                "temp_c": zone["temp_c"],
+                "source": "sysctl",
+            })
+
+        if not temps:
+            return None
+
+        return {"temps": temps}
+
     def _collect_containers(self) -> list[dict[str, Any]]:
         if not self.health.containers:
             return []
@@ -1981,6 +2005,10 @@ class MetricsCollector:
         sensors_board = self._collect_linux_sensors()
         if sensors_board:
             self._merge_motherboard(motherboard, sensors_board)
+
+        freebsd_sensors = self._collect_freebsd_sensors()
+        if freebsd_sensors:
+            self._merge_motherboard(motherboard, freebsd_sensors)
 
         # Try sysfs DMI first (no root required), then fall back to dmidecode
         sysfs_dmi = self._collect_sysfs_dmi()

@@ -281,6 +281,41 @@ class TestFreeBSDCollector:
         assert zones[1]["name"] == "tz1"
         assert zones[1]["temp_c"] == 52.0
 
+    @patch("telemetry_tap.collector.MetricsCollector._run_command")
+    def test_collect_freebsd_sensors(self, mock_run_command, mock_freebsd, collector):
+        """Test FreeBSD sensor collection returns motherboard-compatible dict."""
+        mock_run_command.return_value = (
+            "hw.acpi.thermal.tz0.temperature: 55.0C\n"
+            "hw.acpi.thermal.tz1.temperature: 52.0C\n"
+        )
+
+        result = collector._collect_freebsd_sensors()
+
+        assert result is not None
+        assert "temps" in result
+        assert len(result["temps"]) == 2
+        assert result["temps"][0]["name"] == "tz0"
+        assert result["temps"][0]["temp_c"] == 55.0
+        assert result["temps"][0]["source"] == "sysctl"
+        assert result["temps"][1]["name"] == "tz1"
+        assert result["temps"][1]["temp_c"] == 52.0
+        assert result["temps"][1]["source"] == "sysctl"
+
+    @patch("telemetry_tap.collector.MetricsCollector._run_command")
+    def test_collect_freebsd_sensors_empty(self, mock_run_command, mock_freebsd, collector):
+        """Test FreeBSD sensor collection returns None when no data."""
+        mock_run_command.return_value = ""
+
+        result = collector._collect_freebsd_sensors()
+
+        assert result is None
+
+    def test_collect_freebsd_sensors_not_freebsd(self, collector):
+        """Test FreeBSD sensor collection returns None on non-FreeBSD."""
+        with patch("platform.system", return_value="Linux"):
+            result = collector._collect_freebsd_sensors()
+            assert result is None
+
 
 @pytest.mark.opnsense
 class TestOPNsenseCollector:

@@ -1,0 +1,126 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, dev, "codex/*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      - name: Run tests
+        run: pytest --cov=telemetry_tap --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v4
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  test-arm:
+    name: Test on Linux ARM64 (QEMU)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Run tests in ARM64 container
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: .github/Dockerfile.arm64-test
+          platforms: linux/arm64
+          push: false
+
+  test-freebsd:
+    name: Test on FreeBSD
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run tests on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.0"
+          usesh: true
+          prepare: |
+            pkg install -y python311 py311-pip py311-sqlite3 rust
+          run: |
+            python3.11 -m pip install --user -e ".[test]"
+            python3.11 -m pytest -v
+
+  build-windows-exe:
+    name: Build Windows Executable
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[build]"
+
+      - name: Build executable
+        run: python build_exe.py --clean
+
+      - name: Test executable help
+        run: ./dist/telemetry-tap.exe --help
+
+      - name: Test executable dry run
+        run: |
+          # Create minimal config for dry run test
+          @"
+          [mqtt]
+          host = localhost
+          port = 1883
+          base_topic = test/telemetry
+
+          [publish]
+          interval = 60
+          "@ | Out-File -FilePath test_config.cfg -Encoding utf8
+          ./dist/telemetry-tap.exe --config test_config.cfg --once --dry-run
+        shell: pwsh
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: telemetry-tap-windows-exe
+          path: dist/telemetry-tap.exe
+          retention-days: 7

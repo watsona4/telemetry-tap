@@ -75,7 +75,7 @@ jobs:
           release: "14.0"
           usesh: true
           prepare: |
-            pkg install -y python311 py311-pip py311-sqlite3
+            pkg install -y python311 py311-pip py311-sqlite3 rust
           run: |
             python3.11 -m pip install --user -e ".[test]"
             python3.11 -m pytest -v

@@ -59,8 +59,8 @@ def main() -> None:
     pretty_print = level <= logging.DEBUG
 
     collector = MetricsCollector(config.collector, config.health)
-    publisher = MqttPublisher(config.mqtt)
-    if not args.dry_run:
+    publisher = None if args.dry_run else MqttPublisher(config.mqtt)
+    if publisher is not None:
         publisher.connect()
 
     initial_payload = collector.collect()
@@ -77,7 +77,7 @@ def main() -> None:
     if args.dry_run:
         logger.info("Dry run enabled; skipping MQTT publish.")
         logger.debug("Initial payload: %s", initial_json)
-    else:
+    elif publisher is not None:
         publisher.publish_discovery(initial_payload)
         publisher.publish(initial_json)
         publisher.loop()
@@ -106,7 +106,7 @@ def main() -> None:
                     handle.write(payload_json)
             if args.dry_run:
                 logger.debug("Payload: %s", payload_json)
-            else:
+            elif publisher is not None:
                 publisher.publish(payload_json)
                 publisher.loop()
             time.sleep(interval)

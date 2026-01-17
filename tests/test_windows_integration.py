@@ -161,7 +161,8 @@ class TestWindowsIntegration:
             except SystemExit:
                 pass
 
-        # In dry-run mode, MQTT is instantiated but connect() is not called
+        # In dry-run mode, MQTT publisher is not instantiated at all
+        mock_publisher.assert_not_called()
         mock_mqtt_instance.connect.assert_not_called()
 
     @patch("telemetry_tap.main.MqttPublisher")
@@ -188,6 +189,8 @@ class TestWindowsIntegration:
             except SystemExit:
                 pass
 
+        # In dry-run mode, MQTT publisher is not instantiated
+        mock_publisher.assert_not_called()
         # Should not enter the infinite loop
         mock_mqtt_instance.loop.assert_not_called()
 

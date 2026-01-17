@@ -2650,10 +2650,7 @@ class MetricsCollector:
 
     def _collect_chrony_serverstats(self) -> dict[str, Any] | None:
         """Collect chrony server statistics."""
-        # Try with sudo first, fall back to regular
-        output = self._run_command(["sudo", "-n", self.config.chronyc_path, "serverstats"])
-        if not output:
-            output = self._run_command([self.config.chronyc_path, "serverstats"])
+        output = self._run_command([self.config.chronyc_path, "serverstats"])
         if not output:
             return None
 
@@ -2685,7 +2682,7 @@ class MetricsCollector:
 
         # Try to get client count
         clients_output = self._run_command(
-            ["sudo", "-n", self.config.chronyc_path, "clients"]
+            [self.config.chronyc_path, "clients"]
         )
         if clients_output:
             # Count non-header lines

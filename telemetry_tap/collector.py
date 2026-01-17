@@ -188,6 +188,12 @@ class MetricsCollector:
             if sbc:
                 host["sbc"] = sbc
 
+        # Add device model, serial, and chassis type from WMI (Windows)
+        elif platform.system().lower() == "windows":
+            hw_info = self._collect_host_hardware_windows()
+            if hw_info:
+                host.update(hw_info)
+
         return host
 
     def _collect_health(self) -> dict[str, Any]:
@@ -696,7 +702,7 @@ class MetricsCollector:
                     ) * 100
                     entry["utilization_pct"] = min(max(utilization, 0.0), 100.0)
 
-            # Add link details on Linux
+            # Add link details based on platform
             if platform.system().lower() == "linux":
                 link_details = self._collect_iface_link_details(iface)
                 if link_details:
@@ -704,6 +710,15 @@ class MetricsCollector:
 
                 # Add WiFi metrics for wireless interfaces
                 wifi_metrics = self._collect_wifi_metrics(iface)
+                if wifi_metrics:
+                    entry["wifi"] = wifi_metrics
+            elif platform.system().lower() == "windows":
+                link_details = self._collect_iface_link_details_windows(iface)
+                if link_details:
+                    entry.update(link_details)
+
+                # Add WiFi metrics for wireless interfaces
+                wifi_metrics = self._collect_wifi_metrics_windows(iface)
                 if wifi_metrics:
                     entry["wifi"] = wifi_metrics
 
@@ -1996,6 +2011,67 @@ class MetricsCollector:
 
         return motherboard if motherboard else None
 
+    def _collect_host_hardware_windows(self) -> dict[str, Any] | None:
+        """Get host hardware info (model, serial, chassis type) from WMI on Windows."""
+        if platform.system().lower() != "windows":
+            return None
+
+        result_info: dict[str, Any] = {}
+
+        # Get computer model from Win32_ComputerSystem
+        result = self._run_command(
+            ["powershell", "-Command",
+             "Get-WmiObject Win32_ComputerSystem | Select-Object Model, Manufacturer | ConvertTo-Json"],
+            stderr=subprocess.DEVNULL,
+        )
+        if result:
+            try:
+                data = json.loads(result)
+                model = data.get("Model")
+                manufacturer = data.get("Manufacturer")
+                if model and manufacturer:
+                    result_info["model"] = f"{manufacturer} {model}"
+                elif model:
+                    result_info["model"] = model
+            except json.JSONDecodeError:
+                pass
+
+        # Get serial number and chassis type from Win32_SystemEnclosure
+        result = self._run_command(
+            ["powershell", "-Command",
+             "Get-WmiObject Win32_SystemEnclosure | Select-Object SerialNumber, ChassisTypes | ConvertTo-Json"],
+            stderr=subprocess.DEVNULL,
+        )
+        if result:
+            try:
+                data = json.loads(result)
+                serial = data.get("SerialNumber")
+                if serial and serial.strip():
+                    result_info["serial"] = serial.strip()
+
+                chassis_types = data.get("ChassisTypes")
+                if chassis_types and isinstance(chassis_types, list) and len(chassis_types) > 0:
+                    # SMBIOS chassis type mapping
+                    chassis_names = {
+                        1: "Other", 2: "Unknown", 3: "Desktop", 4: "Low Profile Desktop",
+                        5: "Pizza Box", 6: "Mini Tower", 7: "Tower", 8: "Portable",
+                        9: "Laptop", 10: "Notebook", 11: "Hand Held", 12: "Docking Station",
+                        13: "All in One", 14: "Sub Notebook", 15: "Space-saving",
+                        16: "Lunch Box", 17: "Main Server Chassis", 18: "Expansion Chassis",
+                        19: "SubChassis", 20: "Bus Expansion Chassis", 21: "Peripheral Chassis",
+                        22: "RAID Chassis", 23: "Rack Mount Chassis", 24: "Sealed-case PC",
+                        25: "Multi-system chassis", 26: "Compact PCI", 27: "Advanced TCA",
+                        28: "Blade", 29: "Blade Enclosure", 30: "Tablet", 31: "Convertible",
+                        32: "Detachable", 33: "IoT Gateway", 34: "Embedded PC", 35: "Mini PC",
+                        36: "Stick PC",
+                    }
+                    chassis_type = chassis_types[0]
+                    result_info["chassis_type"] = chassis_names.get(chassis_type, f"Type {chassis_type}")
+            except json.JSONDecodeError:
+                pass
+
+        return result_info if result_info else None
+
     def _collect_lhm_gpus(self) -> list[dict[str, Any]]:
         data = self._read_lhm()
         if not data:
@@ -3160,6 +3236,159 @@ class MetricsCollector:
                             result["signal_pct"] = (int(num) / int(denom)) * 100
                     except (IndexError, ValueError):
                         pass
+
+        return result if result else None
+
+    def _collect_iface_link_details_windows(self, iface: str) -> dict[str, Any] | None:
+        """Collect network interface link details on Windows using Get-NetAdapter."""
+        # Get-NetAdapter returns adapter details including speed, status, and MTU
+        ps_cmd = f"""
+        $adapter = Get-NetAdapter -Name '{iface}' -ErrorAction SilentlyContinue
+        if ($adapter) {{
+            $props = @{{
+                'LinkSpeed' = $adapter.LinkSpeed
+                'MediaConnectionState' = $adapter.MediaConnectionState
+                'FullDuplex' = $adapter.FullDuplex
+                'Status' = $adapter.Status
+                'InterfaceDescription' = $adapter.InterfaceDescription
+            }}
+            # Get MTU from Get-NetIPInterface
+            $ipif = Get-NetIPInterface -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+            if ($ipif) {{
+                $props['Mtu'] = $ipif.NlMtu
+            }}
+            $props | ConvertTo-Json
+        }}
+        """
+        output = self._run_command(["powershell", "-NoProfile", "-Command", ps_cmd])
+        if not output:
+            return None
+
+        try:
+            data = json.loads(output)
+        except json.JSONDecodeError:
+            return None
+
+        result: dict[str, Any] = {}
+
+        # Parse link speed (e.g., "1 Gbps", "100 Mbps")
+        link_speed = data.get("LinkSpeed", "")
+        if link_speed:
+            try:
+                # Parse speed string like "1 Gbps" or "100 Mbps"
+                parts = link_speed.split()
+                if len(parts) >= 2:
+                    speed_val = float(parts[0])
+                    unit = parts[1].lower()
+                    if "gbps" in unit:
+                        result["link_speed_mbps"] = int(speed_val * 1000)
+                    elif "mbps" in unit:
+                        result["link_speed_mbps"] = int(speed_val)
+            except (ValueError, IndexError):
+                pass
+
+        # Duplex
+        full_duplex = data.get("FullDuplex")
+        if full_duplex is not None:
+            result["duplex"] = "full" if full_duplex else "half"
+
+        # MTU
+        mtu = data.get("Mtu")
+        if mtu:
+            try:
+                result["mtu"] = int(mtu)
+            except (ValueError, TypeError):
+                pass
+
+        # Carrier (link up/down)
+        status = data.get("Status", "")
+        if status:
+            result["carrier"] = status.lower() == "up"
+
+        # Driver (interface description often contains driver/adapter info)
+        desc = data.get("InterfaceDescription")
+        if desc:
+            result["driver"] = desc
+
+        return result if result else None
+
+    def _collect_wifi_metrics_windows(self, iface: str) -> dict[str, Any] | None:
+        """Collect WiFi metrics for a wireless interface on Windows using netsh."""
+        # Check if this interface is the WiFi adapter by checking its name
+        # Windows WiFi adapters typically have "Wi-Fi" or "Wireless" in the name
+        iface_lower = iface.lower()
+        if not ("wi-fi" in iface_lower or "wifi" in iface_lower or "wireless" in iface_lower):
+            return None
+
+        # Use netsh to get WiFi interface details
+        output = self._run_command(["netsh", "wlan", "show", "interfaces"])
+        if not output:
+            return None
+
+        result: dict[str, Any] = {}
+
+        # Parse netsh output - it shows all wireless interfaces
+        # We need to find the section for our interface
+        lines = output.split("\n")
+        in_our_interface = False
+
+        for line in lines:
+            line = line.strip()
+
+            # Check if we're entering the section for our interface
+            if line.startswith("Name") and ":" in line:
+                current_name = line.split(":", 1)[1].strip()
+                in_our_interface = current_name.lower() == iface_lower
+
+            if not in_our_interface:
+                continue
+
+            # Parse fields
+            if ":" not in line:
+                continue
+
+            key, value = line.split(":", 1)
+            key = key.strip().lower()
+            value = value.strip()
+
+            if key == "ssid":
+                result["essid"] = value
+            elif key == "bssid":
+                result["access_point"] = value
+            elif key == "network type":
+                result["mode"] = value
+            elif key == "channel":
+                try:
+                    result["channel"] = int(value)
+                except ValueError:
+                    pass
+            elif key == "receive rate (mbps)":
+                try:
+                    result["rx_rate_mbps"] = float(value)
+                except ValueError:
+                    pass
+            elif key == "transmit rate (mbps)":
+                try:
+                    result["tx_rate_mbps"] = float(value)
+                    result["bitrate_mbps"] = float(value)  # Also set bitrate for compatibility
+                except ValueError:
+                    pass
+            elif key == "signal":
+                # Signal is reported as percentage like "98%"
+                try:
+                    sig_pct = int(value.rstrip("%"))
+                    result["signal_pct"] = sig_pct
+                    # Approximate dBm from percentage
+                    # Common approximation: dBm = (signal% / 2) - 100
+                    result["signal_dbm"] = int((sig_pct / 2) - 100)
+                except ValueError:
+                    pass
+            elif key == "radio type":
+                result["radio_type"] = value  # e.g., "802.11ax"
+            elif key == "authentication":
+                result["authentication"] = value
+            elif key == "cipher":
+                result["cipher"] = value
 
         return result if result else None
 

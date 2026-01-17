@@ -93,6 +93,10 @@
           "type": "string",
           "description": "Device serial number from firmware/device-tree, if available."
         },
+        "chassis_type": {
+          "type": "string",
+          "description": "System chassis type from SMBIOS (for example: 'Notebook', 'Desktop', 'Laptop', 'Tower')."
+        },
         "throttling": {
           "type": "object",
           "description": "SBC/embedded throttling status from vcgencmd or equivalent (Raspberry Pi, etc.).",
@@ -1780,6 +1784,10 @@
             "type": "boolean",
             "description": "True if the link has carrier (cable connected and link established)."
           },
+          "driver": {
+            "type": "string",
+            "description": "Network adapter driver or interface description, if available."
+          },
           "wifi": {
             "type": "object",
             "description": "WiFi-specific metrics for wireless interfaces.",
@@ -1823,7 +1831,34 @@
               },
               "mode": {
                 "type": "string",
-                "description": "WiFi mode (for example: 'Managed', 'Ad-Hoc', 'Master', 'Monitor')."
+                "description": "WiFi mode (for example: 'Managed', 'Ad-Hoc', 'Master', 'Monitor', 'Infrastructure')."
+              },
+              "channel": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "WiFi channel number (for example: 1, 6, 36, 40)."
+              },
+              "radio_type": {
+                "type": "string",
+                "description": "WiFi radio type/standard (for example: '802.11ax', '802.11ac', '802.11n')."
+              },
+              "authentication": {
+                "type": "string",
+                "description": "WiFi authentication type (for example: 'WPA2-Personal', 'WPA3-Personal', 'Open')."
+              },
+              "cipher": {
+                "type": "string",
+                "description": "WiFi encryption cipher (for example: 'CCMP', 'TKIP', 'GCMP')."
+              },
+              "rx_rate_mbps": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Current receive rate in Mbps, if available."
+              },
+              "tx_rate_mbps": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Current transmit rate in Mbps, if available."
               }
             }
           }

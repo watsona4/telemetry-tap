@@ -68,9 +68,7 @@ def main() -> int:
             "--add-data", f"{project_root / 'telemetry_tap' / 'schemas'};telemetry_tap/schemas",
             "--hidden-import", "paho.mqtt.client",
             "--hidden-import", "jsonschema",
-            "--hidden-import", "referencing",
-            "--hidden-import", "referencing.jsonschema",
-            "--hidden-import", "rpds",
+            "--hidden-import", "pyrsistent",
             "--console",
             str(project_root / "telemetry_tap" / "main.py"),
         ])

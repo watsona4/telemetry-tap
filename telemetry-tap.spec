@@ -27,9 +27,7 @@ hiddenimports = [
     'jsonschema._utils',
     'jsonschema.protocols',
     'jsonschema.validators',
-    'referencing',
-    'referencing.jsonschema',
-    'rpds',
+    'pyrsistent',
     'psutil',
     'colorlog',
 ]

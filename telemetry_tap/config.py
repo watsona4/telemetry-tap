@@ -44,6 +44,17 @@ class CollectorConfig:
     chronyc_path: str
     gpspipe_path: str
     pps_device: str | None
+    # FreeBSD tool paths
+    sysctl_path: str
+    pkg_path: str
+    service_path: str
+    # OPNsense-specific tool paths
+    pluginctl_path: str
+    configctl_path: str
+    zenarmorctl_path: str
+    # Feature toggles
+    enable_opnsense: bool
+    enable_zenarmor: bool
 
 
 @dataclass(frozen=True)
@@ -120,6 +131,17 @@ def load_config(path: str | Path) -> AppConfig:
         chronyc_path=parser.get("collector", "chronyc_path", fallback="chronyc"),
         gpspipe_path=parser.get("collector", "gpspipe_path", fallback="gpspipe"),
         pps_device=_get_optional(parser.get("collector", "pps_device", fallback=None)),
+        # FreeBSD tool paths
+        sysctl_path=parser.get("collector", "sysctl_path", fallback="sysctl"),
+        pkg_path=parser.get("collector", "pkg_path", fallback="pkg"),
+        service_path=parser.get("collector", "service_path", fallback="service"),
+        # OPNsense-specific tool paths
+        pluginctl_path=parser.get("collector", "pluginctl_path", fallback="pluginctl"),
+        configctl_path=parser.get("collector", "configctl_path", fallback="configctl"),
+        zenarmorctl_path=parser.get("collector", "zenarmorctl_path", fallback="zenarmorctl"),
+        # Feature toggles
+        enable_opnsense=parser.getboolean("collector", "enable_opnsense", fallback=False),
+        enable_zenarmor=parser.getboolean("collector", "enable_zenarmor", fallback=False),
     )
 
     # Use parser.get with fallback to handle missing [health] section

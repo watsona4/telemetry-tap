@@ -28,6 +28,14 @@ def time_server_config():
         chronyc_path="chronyc",
         gpspipe_path="gpspipe",
         pps_device="/dev/pps0",
+        sysctl_path="sysctl",
+        pkg_path="pkg",
+        service_path="service",
+        pluginctl_path="pluginctl",
+        configctl_path="configctl",
+        zenarmorctl_path="zenarmorctl",
+        enable_opnsense=False,
+        enable_zenarmor=False,
     )
 
 

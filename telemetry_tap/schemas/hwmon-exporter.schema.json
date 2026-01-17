@@ -2576,6 +2576,65 @@
           }
         }
       }
+    },
+    "opnsense": {
+      "type": "object",
+      "description": "OPNsense firewall system information (FreeBSD-based).",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "type": "string",
+          "description": "OPNsense version string from opnsense-version command."
+        },
+        "status_raw": {
+          "type": "string",
+          "description": "Raw system status output from configctl system status."
+        }
+      }
+    },
+    "opnsense_plugins": {
+      "type": "array",
+      "description": "List of installed OPNsense plugins from pluginctl.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Plugin package name."
+          },
+          "version": {
+            "type": "string",
+            "description": "Installed plugin version."
+          }
+        },
+        "required": ["name"]
+      }
+    },
+    "zenarmor": {
+      "type": "object",
+      "description": "Zenarmor (Sensei) network security service status.",
+      "additionalProperties": false,
+      "properties": {
+        "cloud_running": {
+          "type": "boolean",
+          "description": "Whether the cloud connector service (senpai) is running."
+        },
+        "cloud_pid": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Process ID of the cloud connector service (senpai) when running."
+        },
+        "engine_running": {
+          "type": "boolean",
+          "description": "Whether the inspection engine (eastpect) is running."
+        },
+        "engine_pid": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Process ID of the inspection engine (eastpect) when running."
+        }
+      }
     }
   },
   "required": [

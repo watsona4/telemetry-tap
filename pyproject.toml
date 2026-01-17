@@ -21,9 +21,8 @@ classifiers = [
 dependencies = [
   "psutil>=5.9.4",
   "paho-mqtt>=1.6.1",
-  "jsonschema>=4.10.3",
+  "jsonschema>=4.10.3,<4.18.0",
   "colorlog>=6.7.0",
-  "rpds-py>=0.12.0",
 ]
 
 [project.scripts]

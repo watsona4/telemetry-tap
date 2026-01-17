@@ -2681,8 +2681,9 @@ class MetricsCollector:
                 pass
 
         # Try to get client count
+        # Use -n to avoid DNS lookups which can hang with many clients
         clients_output = self._run_command(
-            [self.config.chronyc_path, "clients"]
+            [self.config.chronyc_path, "-n", "clients"]
         )
         if clients_output:
             # Count non-header lines

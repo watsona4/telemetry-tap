@@ -39,6 +39,11 @@ class CollectorConfig:
     borg_path: str
     borg_repos: list[str]
     enable_tpu: bool
+    # Time server configuration
+    enable_time_server: bool
+    chronyc_path: str
+    gpspipe_path: str
+    pps_device: str | None
 
 
 @dataclass(frozen=True)
@@ -112,6 +117,10 @@ def load_config(path: str | Path) -> AppConfig:
         borg_path=str(collector_section.get("borg_path", "borg")),
         borg_repos=_get_list(collector_section.get("borg_repos")),
         enable_tpu=collector_section.getboolean("enable_tpu", True),
+        enable_time_server=collector_section.getboolean("enable_time_server", False),
+        chronyc_path=str(collector_section.get("chronyc_path", "chronyc")),
+        gpspipe_path=str(collector_section.get("gpspipe_path", "gpspipe")),
+        pps_device=_get_optional(collector_section.get("pps_device")),
     )
 
     health = HealthConfig(

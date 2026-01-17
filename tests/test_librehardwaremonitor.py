@@ -25,6 +25,10 @@ def lhm_config():
         borg_path="borg",
         borg_repos=[],
         enable_tpu=False,
+        enable_time_server=False,
+        chronyc_path="chronyc",
+        gpspipe_path="gpspipe",
+        pps_device=None,
     )
 
 
@@ -213,6 +217,10 @@ class TestLibreHardwareMonitorIntegration:
             borg_path="borg",
             borg_repos=[],
             enable_tpu=False,
+            enable_time_server=False,
+            chronyc_path="chronyc",
+            gpspipe_path="gpspipe",
+            pps_device=None,
         )
         collector = MetricsCollector(config, health_config)
 

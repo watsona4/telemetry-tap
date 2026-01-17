@@ -139,6 +139,11 @@ class MetricsCollector:
         if backup_providers:
             payload["backup_providers"] = backup_providers
 
+        if self.config.enable_time_server:
+            time_server = self._collect_time_server()
+            if time_server:
+                payload["time_server"] = time_server
+
         self.logger.debug("Completed metrics payload collection.")
         return payload
 
@@ -2334,6 +2339,496 @@ class MetricsCollector:
             providers.append(entry)
 
         return providers
+
+    def _collect_time_server(self) -> dict[str, Any] | None:
+        """Collect time server metrics from chrony, gpsd, and PPS."""
+        result: dict[str, Any] = {}
+
+        # Collect chrony tracking info
+        tracking = self._collect_chrony_tracking()
+        if tracking:
+            result["tracking"] = tracking
+
+        # Collect chrony sources
+        sources = self._collect_chrony_sources()
+        if sources:
+            result["sources"] = sources
+
+        # Collect server stats (may require elevated privileges)
+        server_stats = self._collect_chrony_serverstats()
+        if server_stats:
+            result["server_stats"] = server_stats
+
+        # Collect GPS data from gpsd
+        gps = self._collect_gpsd()
+        if gps:
+            result["gps"] = gps
+
+        # Collect PPS data
+        pps = self._collect_pps()
+        if pps:
+            result["pps"] = pps
+
+        # Collect service statuses
+        services = self._collect_time_services()
+        if services:
+            result["services"] = services
+
+        return result if result else None
+
+    def _collect_chrony_tracking(self) -> dict[str, Any] | None:
+        """Collect chrony tracking status."""
+        output = self._run_command([self.config.chronyc_path, "tracking"])
+        if not output:
+            return None
+
+        result: dict[str, Any] = {}
+        for line in output.strip().splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            key = key.strip()
+            value = value.strip()
+
+            if key == "Reference ID":
+                # Parse "E1FE1EBE (time.cloudflare.com)"
+                parts = value.split("(")
+                result["reference_id"] = parts[0].strip()
+                if len(parts) > 1:
+                    result["reference_name"] = parts[1].rstrip(")")
+            elif key == "Stratum":
+                try:
+                    result["stratum"] = int(value)
+                except ValueError:
+                    pass
+            elif key == "System time":
+                # Parse "0.000226142 seconds slow of NTP time"
+                try:
+                    parts = value.split()
+                    offset = float(parts[0])
+                    if "slow" in value:
+                        offset = -offset
+                    result["system_time_offset_s"] = offset
+                except (ValueError, IndexError):
+                    pass
+            elif key == "Last offset":
+                try:
+                    result["last_offset_s"] = float(value.split()[0])
+                except (ValueError, IndexError):
+                    pass
+            elif key == "RMS offset":
+                try:
+                    result["rms_offset_s"] = float(value.split()[0])
+                except (ValueError, IndexError):
+                    pass
+            elif key == "Frequency":
+                # Parse "14.770 ppm fast"
+                try:
+                    parts = value.split()
+                    freq = float(parts[0])
+                    if "fast" in value:
+                        pass  # positive
+                    elif "slow" in value:
+                        freq = -freq
+                    result["frequency_ppm"] = freq
+                except (ValueError, IndexError):
+                    pass
+            elif key == "Residual freq":
+                try:
+                    result["residual_freq_ppm"] = float(value.split()[0])
+                except (ValueError, IndexError):
+                    pass
+            elif key == "Skew":
+                try:
+                    result["skew_ppm"] = float(value.split()[0])
+                except (ValueError, IndexError):
+                    pass
+            elif key == "Root delay":
+                try:
+                    result["root_delay_s"] = float(value.split()[0])
+                except (ValueError, IndexError):
+                    pass
+            elif key == "Root dispersion":
+                try:
+                    result["root_dispersion_s"] = float(value.split()[0])
+                except (ValueError, IndexError):
+                    pass
+            elif key == "Update interval":
+                try:
+                    result["update_interval_s"] = float(value.split()[0])
+                except (ValueError, IndexError):
+                    pass
+            elif key == "Leap status":
+                result["leap_status"] = value
+
+        return result if result else None
+
+    def _collect_chrony_sources(self) -> list[dict[str, Any]] | None:
+        """Collect chrony sources and sourcestats."""
+        # Get sources
+        sources_output = self._run_command([self.config.chronyc_path, "sources"])
+        if not sources_output:
+            return None
+
+        # Get sourcestats for additional metrics
+        stats_output = self._run_command([self.config.chronyc_path, "sourcestats"])
+        stats_map: dict[str, dict[str, Any]] = {}
+        if stats_output:
+            for line in stats_output.strip().splitlines():
+                if line.startswith("=") or line.startswith(" "):
+                    continue
+                parts = line.split()
+                if len(parts) >= 8:
+                    name = parts[0]
+                    try:
+                        stats_map[name] = {
+                            "samples": int(parts[1]),
+                            "frequency_ppm": float(parts[4]),
+                            "frequency_skew_ppm": float(parts[5]),
+                            "std_dev_s": self._parse_time_value(parts[7]),
+                        }
+                    except (ValueError, IndexError):
+                        pass
+
+        sources: list[dict[str, Any]] = []
+        mode_map = {"^": "server", "=": "peer", "#": "local"}
+        state_map = {
+            "*": "sync",
+            "+": "combined",
+            "-": "not_combined",
+            "x": "maybe_error",
+            "~": "too_variable",
+            "?": "unusable",
+            " ": "unselected",
+        }
+
+        for line in sources_output.strip().splitlines():
+            # Skip header lines
+            if line.startswith("=") or line.startswith(" ") or "Name/IP" in line:
+                continue
+            if len(line) < 3:
+                continue
+
+            # Parse "MS Name/IP address         Stratum Poll Reach LastRx Last sample"
+            mode_char = line[0]
+            state_char = line[1]
+
+            # Parse the rest
+            rest = line[2:].strip()
+            parts = rest.split()
+            if len(parts) < 5:
+                continue
+
+            name = parts[0]
+            entry: dict[str, Any] = {
+                "name": name,
+                "mode": mode_map.get(mode_char, "server"),
+                "state": state_map.get(state_char, "unselected"),
+            }
+
+            try:
+                entry["stratum"] = int(parts[1])
+            except (ValueError, IndexError):
+                pass
+
+            try:
+                entry["poll_interval"] = int(parts[2])
+            except (ValueError, IndexError):
+                pass
+
+            try:
+                entry["reachability"] = int(parts[3], 8)  # Octal
+            except (ValueError, IndexError):
+                pass
+
+            # Parse LastRx (can be a number or "6d" for days, "21m" for minutes, etc.)
+            if len(parts) > 4:
+                entry["last_rx_s"] = self._parse_time_interval(parts[4])
+
+            # Parse last sample offset and error from the "[xxxx] +/- zzzz" format
+            sample_match = line.find("[")
+            if sample_match != -1:
+                sample_end = line.find("]", sample_match)
+                if sample_end != -1:
+                    sample_str = line[sample_match + 1:sample_end].strip()
+                    entry["offset_s"] = self._parse_time_value(sample_str)
+
+                    # Find error after "+/-"
+                    error_start = line.find("+/-", sample_end)
+                    if error_start != -1:
+                        error_str = line[error_start + 3:].strip()
+                        entry["error_s"] = self._parse_time_value(error_str)
+
+            # Merge stats if available
+            if name in stats_map:
+                entry.update(stats_map[name])
+
+            sources.append(entry)
+
+        return sources if sources else None
+
+    def _collect_chrony_serverstats(self) -> dict[str, Any] | None:
+        """Collect chrony server statistics."""
+        # Try with sudo first, fall back to regular
+        output = self._run_command(["sudo", "-n", self.config.chronyc_path, "serverstats"])
+        if not output:
+            output = self._run_command([self.config.chronyc_path, "serverstats"])
+        if not output:
+            return None
+
+        result: dict[str, Any] = {}
+        for line in output.strip().splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            key = key.strip()
+            value = value.strip()
+
+            try:
+                if "NTP packets received" in key:
+                    result["ntp_packets_received"] = int(value)
+                elif "NTP packets dropped" in key:
+                    result["ntp_packets_dropped"] = int(value)
+                elif "Command packets received" in key:
+                    result["cmd_packets_received"] = int(value)
+                elif "Command packets dropped" in key:
+                    result["cmd_packets_dropped"] = int(value)
+                elif "NTS-KE connections accepted" in key:
+                    result["nts_ke_connections"] = int(value)
+                elif "Authenticated NTP packets" in key:
+                    result["authenticated_packets"] = int(value)
+                elif "Interleaved NTP packets" in key:
+                    result["interleaved_packets"] = int(value)
+            except ValueError:
+                pass
+
+        # Try to get client count
+        clients_output = self._run_command(
+            ["sudo", "-n", self.config.chronyc_path, "clients"]
+        )
+        if clients_output:
+            # Count non-header lines
+            client_count = 0
+            for line in clients_output.strip().splitlines():
+                if line.startswith("=") or line.startswith("Hostname") or not line.strip():
+                    continue
+                client_count += 1
+            if client_count > 0:
+                result["client_count"] = client_count
+
+        return result if result else None
+
+    def _collect_gpsd(self) -> dict[str, Any] | None:
+        """Collect GPS data from gpsd via gpspipe."""
+        output = self._run_command(
+            [self.config.gpspipe_path, "-w", "-n", "5"],
+            stderr=subprocess.DEVNULL,
+        )
+        if not output:
+            return None
+
+        result: dict[str, Any] = {}
+        satellites: list[dict[str, Any]] = []
+
+        for line in output.strip().splitlines():
+            try:
+                data = json.loads(line)
+                msg_class = data.get("class")
+
+                if msg_class == "DEVICES":
+                    # Handle DEVICES wrapper with array of devices
+                    devices = data.get("devices", [])
+                    if devices:
+                        dev = devices[0]  # Use first device
+                        result["device"] = dev.get("path")
+                        result["driver"] = dev.get("driver")
+                        subtype = dev.get("subtype1") or dev.get("subtype")
+                        if subtype:
+                            result["model"] = subtype
+
+                elif msg_class == "DEVICE":
+                    # Handle standalone DEVICE message
+                    result["device"] = data.get("path")
+                    result["driver"] = data.get("driver")
+                    subtype = data.get("subtype1") or data.get("subtype")
+                    if subtype:
+                        result["model"] = subtype
+
+                elif msg_class == "TPV":
+                    result["mode"] = data.get("mode", 0)
+                    result["status"] = data.get("status", 0)
+                    if "time" in data:
+                        result["time"] = data["time"]
+                    if "lat" in data:
+                        result["latitude"] = data["lat"]
+                    if "lon" in data:
+                        result["longitude"] = data["lon"]
+                    if "alt" in data:
+                        result["altitude_m"] = data["alt"]
+                    if "speed" in data:
+                        result["speed_mps"] = data["speed"]
+                    if "climb" in data:
+                        result["climb_mps"] = data["climb"]
+                    if "track" in data:
+                        result["track_deg"] = data["track"]
+                    if "ept" in data:
+                        result["ept_s"] = data["ept"]
+                    if "epx" in data:
+                        result["epx_m"] = data["epx"]
+                    if "epy" in data:
+                        result["epy_m"] = data["epy"]
+                    if "epv" in data:
+                        result["epv_m"] = data["epv"]
+                    if "leapseconds" in data:
+                        result["leapseconds"] = data["leapseconds"]
+
+                elif msg_class == "SKY":
+                    if "hdop" in data and data["hdop"] < 99:
+                        result["hdop"] = data["hdop"]
+                    if "vdop" in data and data["vdop"] < 99:
+                        result["vdop"] = data["vdop"]
+                    if "pdop" in data and data["pdop"] < 99:
+                        result["pdop"] = data["pdop"]
+                    if "tdop" in data and data["tdop"] < 99:
+                        result["tdop"] = data["tdop"]
+                    if "gdop" in data and data["gdop"] < 99:
+                        result["gdop"] = data["gdop"]
+                    if "nSat" in data:
+                        result["satellites_visible"] = data["nSat"]
+                    if "uSat" in data:
+                        result["satellites_used"] = data["uSat"]
+
+                    # Collect satellite info
+                    for sat in data.get("satellites", []):
+                        sat_entry: dict[str, Any] = {}
+                        if "PRN" in sat:
+                            sat_entry["prn"] = sat["PRN"]
+                        if "gnssid" in sat:
+                            sat_entry["gnssid"] = sat["gnssid"]
+                        if "el" in sat:
+                            sat_entry["elevation"] = sat["el"]
+                        if "az" in sat:
+                            sat_entry["azimuth"] = sat["az"]
+                        if "ss" in sat:
+                            sat_entry["signal_strength"] = sat["ss"]
+                        if "used" in sat:
+                            sat_entry["used"] = sat["used"]
+                        if "health" in sat:
+                            sat_entry["health"] = sat["health"]
+                        if sat_entry:
+                            satellites.append(sat_entry)
+
+            except json.JSONDecodeError:
+                continue
+
+        if satellites:
+            result["satellites"] = satellites
+
+        return result if result else None
+
+    def _collect_pps(self) -> dict[str, Any] | None:
+        """Collect PPS signal data from sysfs."""
+        pps_device = self.config.pps_device or "/dev/pps0"
+        device_name = Path(pps_device).name  # e.g., "pps0"
+        sysfs_path = f"/sys/class/pps/{device_name}"
+
+        result: dict[str, Any] = {"device": pps_device}
+
+        # Read assert timestamp and sequence
+        assert_data = self._read_file(f"{sysfs_path}/assert")
+        if assert_data:
+            try:
+                # Format: "1768068085.000001313#1291306"
+                parts = assert_data.strip().split("#")
+                if len(parts) == 2:
+                    result["assert_timestamp_s"] = float(parts[0])
+                    result["assert_sequence"] = int(parts[1])
+            except (ValueError, IndexError):
+                pass
+
+        # Read clear timestamp and sequence
+        clear_data = self._read_file(f"{sysfs_path}/clear")
+        if clear_data:
+            try:
+                parts = clear_data.strip().split("#")
+                if len(parts) == 2:
+                    result["clear_timestamp_s"] = float(parts[0])
+                    result["clear_sequence"] = int(parts[1])
+            except (ValueError, IndexError):
+                pass
+
+        # Only return if we got some data beyond just the device
+        return result if len(result) > 1 else None
+
+    def _collect_time_services(self) -> dict[str, Any] | None:
+        """Check status of time-related services."""
+        result: dict[str, Any] = {}
+
+        # Check chronyd
+        chrony_status = self._run_command(
+            [self.config.systemctl_path, "is-active", "chronyd"]
+        )
+        if chrony_status:
+            result["chronyd"] = chrony_status.strip() == "active"
+
+        # Check gpsd
+        gpsd_status = self._run_command(
+            [self.config.systemctl_path, "is-active", "gpsd"]
+        )
+        if gpsd_status:
+            result["gpsd"] = gpsd_status.strip() == "active"
+
+        # Check str2str (NTRIP client)
+        ntrip_status = self._run_command(
+            [self.config.systemctl_path, "is-active", "str2str"]
+        )
+        if ntrip_status:
+            result["ntrip"] = ntrip_status.strip() == "active"
+
+        return result if result else None
+
+    def _parse_time_value(self, value: str) -> float:
+        """Parse a time value like '21ms', '+1773ns', '-2222us', '15ms' to seconds."""
+        value = value.strip().lstrip("+")
+        multipliers = {
+            "ns": 1e-9,
+            "us": 1e-6,
+            "ms": 1e-3,
+            "s": 1,
+        }
+        for suffix, mult in multipliers.items():
+            if value.endswith(suffix):
+                try:
+                    return float(value[:-len(suffix)]) * mult
+                except ValueError:
+                    return 0.0
+        try:
+            return float(value)
+        except ValueError:
+            return 0.0
+
+    def _parse_time_interval(self, value: str) -> float:
+        """Parse a time interval like '6d', '21m', '33m', '260' to seconds."""
+        value = value.strip()
+        if value == "-":
+            return 0.0
+
+        multipliers = {
+            "d": 86400,
+            "h": 3600,
+            "m": 60,
+            "s": 1,
+        }
+        for suffix, mult in multipliers.items():
+            if value.endswith(suffix):
+                try:
+                    return float(value[:-1]) * mult
+                except ValueError:
+                    return 0.0
+        try:
+            return float(value)
+        except ValueError:
+            return 0.0
 
     def _read_lhm(self) -> dict[str, Any] | None:
         if not self.config.librehardwaremonitor_url:

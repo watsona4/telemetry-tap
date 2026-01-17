@@ -32,6 +32,10 @@ def collector_config():
         borg_path="borg",
         borg_repos=[],
         enable_tpu=False,
+        enable_time_server=False,
+        chronyc_path="chronyc",
+        gpspipe_path="gpspipe",
+        pps_device=None,
     )
 
 

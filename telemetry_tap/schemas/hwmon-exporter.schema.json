@@ -2131,6 +2131,416 @@
         ]
       },
       "minItems": 1
+    },
+    "time_server": {
+      "type": "object",
+      "description": "Time server metrics for NTP/chrony servers, GPS time sources, and PPS signals.",
+      "additionalProperties": false,
+      "properties": {
+        "tracking": {
+          "type": "object",
+          "description": "Current time synchronization tracking status from chrony/NTP.",
+          "additionalProperties": false,
+          "properties": {
+            "reference_id": {
+              "type": "string",
+              "description": "Reference ID of the current sync source (IP or name)."
+            },
+            "reference_name": {
+              "type": "string",
+              "description": "Human-readable name of the reference source."
+            },
+            "stratum": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "description": "Stratum level of this server (1 = primary reference, 16 = unsynchronized)."
+            },
+            "system_time_offset_s": {
+              "type": "number",
+              "description": "Current offset of system clock from NTP time in seconds."
+            },
+            "last_offset_s": {
+              "type": "number",
+              "description": "Estimated offset of the last clock update in seconds."
+            },
+            "rms_offset_s": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Long-term average of the offset value in seconds."
+            },
+            "frequency_ppm": {
+              "type": "number",
+              "description": "Frequency offset of the system clock in parts per million."
+            },
+            "residual_freq_ppm": {
+              "type": "number",
+              "description": "Residual frequency error in parts per million."
+            },
+            "skew_ppm": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Estimated error bound on the frequency in parts per million."
+            },
+            "root_delay_s": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Total network path delay to the stratum-1 source in seconds."
+            },
+            "root_dispersion_s": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Total dispersion accumulated through all servers to the primary source in seconds."
+            },
+            "update_interval_s": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Interval between the last two clock updates in seconds."
+            },
+            "leap_status": {
+              "type": "string",
+              "enum": ["Normal", "Insert second", "Delete second", "Not synchronised"],
+              "description": "Current leap second status."
+            }
+          }
+        },
+        "sources": {
+          "type": "array",
+          "description": "List of configured time sources (NTP servers, GPS, PPS, etc.).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Source name or IP address."
+              },
+              "mode": {
+                "type": "string",
+                "enum": ["server", "peer", "local"],
+                "description": "Source mode: server (^), peer (=), or local clock (#)."
+              },
+              "state": {
+                "type": "string",
+                "enum": ["sync", "combined", "not_combined", "maybe_error", "too_variable", "unusable", "unselected"],
+                "description": "Current state: sync (*), combined (+), not_combined (-), maybe_error (x), too_variable (~), unusable (?), unselected."
+              },
+              "stratum": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16,
+                "description": "Stratum of this source."
+              },
+              "poll_interval": {
+                "type": "integer",
+                "description": "Log2 of the polling interval in seconds."
+              },
+              "reachability": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255,
+                "description": "Reachability register (octal representation of last 8 polls)."
+              },
+              "last_rx_s": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Seconds since last response received."
+              },
+              "offset_s": {
+                "type": "number",
+                "description": "Adjusted offset of the source in seconds."
+              },
+              "error_s": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Estimated error of the source in seconds."
+              },
+              "frequency_ppm": {
+                "type": "number",
+                "description": "Frequency offset estimate for this source in ppm."
+              },
+              "frequency_skew_ppm": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Estimated error in frequency in ppm."
+              },
+              "std_dev_s": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Standard deviation of the source offset in seconds."
+              },
+              "samples": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Number of sample points in the regression."
+              }
+            },
+            "required": ["name", "mode", "state"]
+          }
+        },
+        "server_stats": {
+          "type": "object",
+          "description": "NTP server statistics (packets served to clients).",
+          "additionalProperties": false,
+          "properties": {
+            "ntp_packets_received": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Total NTP packets received from clients."
+            },
+            "ntp_packets_dropped": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Total NTP packets dropped."
+            },
+            "cmd_packets_received": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Total command packets received."
+            },
+            "cmd_packets_dropped": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Total command packets dropped."
+            },
+            "nts_ke_connections": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Total NTS-KE connections accepted."
+            },
+            "authenticated_packets": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Total authenticated NTP packets."
+            },
+            "interleaved_packets": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Total interleaved NTP packets."
+            },
+            "client_count": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of unique NTP clients served."
+            }
+          }
+        },
+        "gps": {
+          "type": "object",
+          "description": "GPS receiver status and satellite information from gpsd.",
+          "additionalProperties": false,
+          "properties": {
+            "device": {
+              "type": "string",
+              "description": "GPS device path (e.g., /dev/ttyACM0)."
+            },
+            "driver": {
+              "type": "string",
+              "description": "GPS driver name (e.g., u-blox)."
+            },
+            "model": {
+              "type": "string",
+              "description": "GPS receiver model/firmware info."
+            },
+            "mode": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3,
+              "description": "Fix mode: 0=unknown, 1=no fix, 2=2D fix, 3=3D fix."
+            },
+            "status": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "GPS status: 0=no fix, 1=fix, 2=DGPS fix."
+            },
+            "time": {
+              "type": "string",
+              "format": "date-time",
+              "description": "GPS timestamp of last fix."
+            },
+            "latitude": {
+              "type": "number",
+              "minimum": -90,
+              "maximum": 90,
+              "description": "Latitude in decimal degrees."
+            },
+            "longitude": {
+              "type": "number",
+              "minimum": -180,
+              "maximum": 180,
+              "description": "Longitude in decimal degrees."
+            },
+            "altitude_m": {
+              "type": "number",
+              "description": "Altitude in meters above mean sea level."
+            },
+            "speed_mps": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Speed over ground in meters per second."
+            },
+            "climb_mps": {
+              "type": "number",
+              "description": "Vertical speed in meters per second."
+            },
+            "track_deg": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 360,
+              "description": "Course over ground in degrees from true north."
+            },
+            "ept_s": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Estimated time error in seconds."
+            },
+            "epx_m": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Longitude error estimate in meters."
+            },
+            "epy_m": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Latitude error estimate in meters."
+            },
+            "epv_m": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Altitude error estimate in meters."
+            },
+            "hdop": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Horizontal dilution of precision."
+            },
+            "vdop": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Vertical dilution of precision."
+            },
+            "pdop": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Position dilution of precision."
+            },
+            "tdop": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Time dilution of precision."
+            },
+            "gdop": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Geometric dilution of precision."
+            },
+            "leapseconds": {
+              "type": "integer",
+              "description": "Current GPS-UTC leap second offset."
+            },
+            "satellites_visible": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of satellites visible."
+            },
+            "satellites_used": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of satellites used in fix."
+            },
+            "satellites": {
+              "type": "array",
+              "description": "Per-satellite signal information.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "prn": {
+                    "type": "integer",
+                    "description": "Satellite PRN/ID number."
+                  },
+                  "gnssid": {
+                    "type": "integer",
+                    "description": "GNSS system ID (0=GPS, 1=SBAS, 2=Galileo, 3=BeiDou, 6=GLONASS)."
+                  },
+                  "elevation": {
+                    "type": "number",
+                    "minimum": -90,
+                    "maximum": 90,
+                    "description": "Elevation angle in degrees."
+                  },
+                  "azimuth": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 360,
+                    "description": "Azimuth angle in degrees from true north."
+                  },
+                  "signal_strength": {
+                    "type": "number",
+                    "description": "Signal strength in dB-Hz."
+                  },
+                  "used": {
+                    "type": "boolean",
+                    "description": "Whether this satellite is used in the current fix."
+                  },
+                  "health": {
+                    "type": "integer",
+                    "description": "Satellite health status (0=unknown, 1=healthy, 2=unhealthy)."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "pps": {
+          "type": "object",
+          "description": "Pulse Per Second signal status.",
+          "additionalProperties": false,
+          "properties": {
+            "device": {
+              "type": "string",
+              "description": "PPS device path (e.g., /dev/pps0)."
+            },
+            "assert_sequence": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Assert event sequence number."
+            },
+            "assert_timestamp_s": {
+              "type": "number",
+              "description": "Timestamp of last assert event in seconds since epoch."
+            },
+            "clear_sequence": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Clear event sequence number."
+            },
+            "clear_timestamp_s": {
+              "type": "number",
+              "description": "Timestamp of last clear event in seconds since epoch."
+            }
+          }
+        },
+        "services": {
+          "type": "object",
+          "description": "Status of time-related services.",
+          "additionalProperties": false,
+          "properties": {
+            "chronyd": {
+              "type": "boolean",
+              "description": "Whether chronyd service is active."
+            },
+            "gpsd": {
+              "type": "boolean",
+              "description": "Whether gpsd service is active."
+            },
+            "ntrip": {
+              "type": "boolean",
+              "description": "Whether NTRIP client (str2str) is active."
+            }
+          }
+        }
+      }
     }
   },
   "required": [

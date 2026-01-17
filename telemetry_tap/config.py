@@ -81,8 +81,6 @@ def load_config(path: str | Path) -> AppConfig:
 
     mqtt_section = parser["mqtt"]
     publish_section = parser["publish"]
-    collector_section = parser["collector"] if "collector" in parser else {}
-    health_section = parser["health"] if "health" in parser else {}
 
     mqtt = MqttConfig(
         host=mqtt_section.get("host", "localhost"),
@@ -102,30 +100,32 @@ def load_config(path: str | Path) -> AppConfig:
         interval_s=publish_section.getint("interval_s", 15),
     )
 
+    # Use parser.get/getboolean with fallback to handle missing [collector] section
     collector = CollectorConfig(
-        smartctl_path=str(collector_section.get("smartctl_path", "smartctl")),
-        lsblk_path=str(collector_section.get("lsblk_path", "lsblk")),
-        sensors_path=str(collector_section.get("sensors_path", "sensors")),
-        dmidecode_path=str(collector_section.get("dmidecode_path", "dmidecode")),
-        apt_path=str(collector_section.get("apt_path", "apt")),
-        dnf_path=str(collector_section.get("dnf_path", "dnf")),
-        systemctl_path=str(collector_section.get("systemctl_path", "systemctl")),
+        smartctl_path=parser.get("collector", "smartctl_path", fallback="smartctl"),
+        lsblk_path=parser.get("collector", "lsblk_path", fallback="lsblk"),
+        sensors_path=parser.get("collector", "sensors_path", fallback="sensors"),
+        dmidecode_path=parser.get("collector", "dmidecode_path", fallback="dmidecode"),
+        apt_path=parser.get("collector", "apt_path", fallback="apt"),
+        dnf_path=parser.get("collector", "dnf_path", fallback="dnf"),
+        systemctl_path=parser.get("collector", "systemctl_path", fallback="systemctl"),
         librehardwaremonitor_url=_get_optional(
-            collector_section.get("librehardwaremonitor_url")
+            parser.get("collector", "librehardwaremonitor_url", fallback=None)
         ),
-        intel_gpu_top_path=str(collector_section.get("intel_gpu_top_path", "intel_gpu_top")),
-        borg_path=str(collector_section.get("borg_path", "borg")),
-        borg_repos=_get_list(collector_section.get("borg_repos")),
-        enable_tpu=collector_section.getboolean("enable_tpu", True),
-        enable_time_server=collector_section.getboolean("enable_time_server", False),
-        chronyc_path=str(collector_section.get("chronyc_path", "chronyc")),
-        gpspipe_path=str(collector_section.get("gpspipe_path", "gpspipe")),
-        pps_device=_get_optional(collector_section.get("pps_device")),
+        intel_gpu_top_path=parser.get("collector", "intel_gpu_top_path", fallback="intel_gpu_top"),
+        borg_path=parser.get("collector", "borg_path", fallback="borg"),
+        borg_repos=_get_list(parser.get("collector", "borg_repos", fallback=None)),
+        enable_tpu=parser.getboolean("collector", "enable_tpu", fallback=True),
+        enable_time_server=parser.getboolean("collector", "enable_time_server", fallback=False),
+        chronyc_path=parser.get("collector", "chronyc_path", fallback="chronyc"),
+        gpspipe_path=parser.get("collector", "gpspipe_path", fallback="gpspipe"),
+        pps_device=_get_optional(parser.get("collector", "pps_device", fallback=None)),
     )
 
+    # Use parser.get with fallback to handle missing [health] section
     health = HealthConfig(
-        services=_get_list(health_section.get("services")),
-        containers=_get_list(health_section.get("containers")),
+        services=_get_list(parser.get("health", "services", fallback=None)),
+        containers=_get_list(parser.get("health", "containers", fallback=None)),
     )
 
     return AppConfig(mqtt=mqtt, publish=publish, collector=collector, health=health)

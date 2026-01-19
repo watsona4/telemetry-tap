@@ -227,7 +227,7 @@ class MetricsCollector:
                     issues.append(
                         f"Container {container['name']} status {container['status']}"
                     )
-        summary = "ok" if not issues else f"issues: {'; '.join(issues)}"
+        summary = "OK" if not issues else f"Issues: {'; '.join(issues)}"
         issues_with_summary = [summary] + issues if issues else [summary]
         if issues:
             self.logger.warning("Health issues detected: %s", issues_with_summary)

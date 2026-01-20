@@ -1365,6 +1365,25 @@
                     "description": "Total time under thermal management condition 2, if reported (device-defined unit)."
                   }
                 }
+              },
+              "temperature_c": {
+                "type": "number",
+                "description": "Drive temperature in Celsius (ATA/SATA), if reported."
+              },
+              "reallocated_sector_ct": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Reallocated sector count (ATA/SATA SMART attribute 5), if reported."
+              },
+              "current_pending_sector": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Current pending sector count (ATA/SATA SMART attribute 197), if reported."
+              },
+              "offline_uncorrectable": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Offline uncorrectable sector count (ATA/SATA SMART attribute 198), if reported."
               }
             }
           },

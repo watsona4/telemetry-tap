@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import math
 import os
+import re
 from pathlib import Path
 import platform
 import logging
@@ -1940,7 +1941,13 @@ class MetricsCollector:
         if not metadata:
             return
         for name in metadata:
-            device_path = f"/dev/{name}"
+            # For NVMe, use controller device (nvme0) instead of namespace (nvme0n1)
+            # as smartctl works better with the controller for SMART data
+            if name.startswith("nvme") and "n" in name:
+                ctrl_name = re.sub(r"^(nvme\d+)n\d+$", r"\1", name)
+                device_path = f"/dev/{ctrl_name}"
+            else:
+                device_path = f"/dev/{name}"
             smart = self._smartctl_info(device_path)
             if smart:
                 metadata[name]["smart"] = smart
@@ -1966,9 +1973,12 @@ class MetricsCollector:
             )
         nvme = data.get("nvme_smart_health_information_log")
         if nvme:
+            # Convert critical_warning to hex string as per schema
+            crit_warn = nvme.get("critical_warning")
+            crit_warn_str = f"0x{crit_warn:02x}" if crit_warn is not None else None
             mapping = {
                 "power_on_hours": nvme.get("power_on_hours"),
-                "critical_warning": nvme.get("critical_warning"),
+                "critical_warning": crit_warn_str,
                 "available_spare_pct": nvme.get("available_spare"),
                 "available_spare_threshold_pct": nvme.get(
                     "available_spare_threshold"
@@ -1987,6 +1997,31 @@ class MetricsCollector:
             for key, value in mapping.items():
                 if value is not None:
                     smart[key] = value
+        else:
+            # ATA/SATA drive - extract from top-level fields and attributes
+            if "power_on_time" in data:
+                hours = data["power_on_time"].get("hours")
+                if hours is not None:
+                    smart["power_on_hours"] = hours
+            if "power_cycle_count" in data:
+                smart["power_cycles"] = data["power_cycle_count"]
+            if "temperature" in data:
+                temp = data["temperature"].get("current")
+                if temp is not None:
+                    smart["temperature_c"] = temp
+            # Extract key SMART attributes
+            ata_attrs = data.get("ata_smart_attributes", {}).get("table", [])
+            attr_map = {
+                5: "reallocated_sector_ct",
+                197: "current_pending_sector",
+                198: "offline_uncorrectable",
+            }
+            for attr in ata_attrs:
+                attr_id = attr.get("id")
+                if attr_id in attr_map:
+                    raw_val = attr.get("raw", {}).get("value")
+                    if raw_val is not None:
+                        smart[attr_map[attr_id]] = raw_val
         if smart:
             return smart
         return None
@@ -3308,7 +3343,8 @@ class MetricsCollector:
             )
             if result.stderr:
                 self.logger.log(TRACE_LEVEL, "stderr: %s", result.stderr.strip())
-            return None
+            if not result.stdout:
+                return None
         if result.stdout:
             self.logger.log(TRACE_LEVEL, "stdout: %s", result.stdout.strip())
         return result.stdout

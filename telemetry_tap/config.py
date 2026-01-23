@@ -18,6 +18,7 @@ class MqttConfig:
     retain: bool
     tls_enabled: bool
     ca_cert: str | None
+    keepalive: int
 
 
 @dataclass(frozen=True)
@@ -105,6 +106,7 @@ def load_config(path: str | Path) -> AppConfig:
         retain=mqtt_section.getboolean("retain", False),
         tls_enabled=mqtt_section.getboolean("tls", False),
         ca_cert=_get_optional(mqtt_section.get("ca_cert")),
+        keepalive=mqtt_section.getint("keepalive", 60),
     )
 
     publish = PublishConfig(

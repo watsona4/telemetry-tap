@@ -45,6 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--dump-json",
         help="Write the JSON payload to a file (overwrites on each loop)",
     )
+    parser.add_argument(
+        "--publish-status",
+        metavar="STATUS",
+        help="Publish a status (e.g., 'sleeping', 'online') to the availability topic and exit. "
+             "Useful for system sleep/wake hooks.",
+    )
     return parser
 
 
@@ -57,6 +63,21 @@ def main() -> None:
     logger = logging.getLogger("telemetry_tap")
     config = load_config(args.config)
     pretty_print = level <= logging.DEBUG
+
+    # Handle --publish-status mode (quick publish and exit)
+    if args.publish_status:
+        publisher = MqttPublisher(config.mqtt)
+        publisher.connect()
+        # Wait briefly for connection to establish
+        time.sleep(0.5)
+        if publisher.connected:
+            publisher.publish_status(args.publish_status)
+            # Wait for message delivery
+            time.sleep(0.5)
+        else:
+            logger.error("Failed to connect to MQTT broker")
+        publisher.disconnect()
+        return
 
     collector = MetricsCollector(config.collector, config.health)
     publisher = None if args.dry_run else MqttPublisher(config.mqtt)
@@ -80,10 +101,11 @@ def main() -> None:
     elif publisher is not None:
         publisher.publish_discovery(initial_payload)
         publisher.publish(initial_json)
-        publisher.loop()
 
     if args.once:
         logger.info("Single-run mode enabled; exiting after initial payload.")
+        if publisher is not None:
+            publisher.disconnect()
         return
 
     interval = max(1, config.publish.interval_s)
@@ -108,10 +130,12 @@ def main() -> None:
                 logger.debug("Payload: %s", payload_json)
             elif publisher is not None:
                 publisher.publish(payload_json)
-                publisher.loop()
             time.sleep(interval)
     except KeyboardInterrupt:
         logging.info("Telemetry Tap stopped.")
+    finally:
+        if publisher is not None:
+            publisher.disconnect()
 
 
 if __name__ == "__main__":

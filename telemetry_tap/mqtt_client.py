@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import ssl
-from typing import Any
+from typing import Any, Callable
 
 import paho.mqtt.client as mqtt
 
@@ -11,15 +11,21 @@ from telemetry_tap.config import MqttConfig
 
 
 class MqttPublisher:
-    def __init__(self, config: MqttConfig) -> None:
+    def __init__(
+        self,
+        config: MqttConfig,
+        on_ha_online: Callable[[], None] | None = None,
+    ) -> None:
         self.config = config
         self.client = mqtt.Client(client_id=config.client_id, protocol=mqtt.MQTTv311)
         self.logger = logging.getLogger(self.__class__.__name__)
         self._connected = False
+        self._on_ha_online = on_ha_online
 
         # Set up callbacks
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
+        self.client.on_message = self._on_message
 
         if config.username:
             self.client.username_pw_set(config.username, config.password)
@@ -67,11 +73,34 @@ class MqttPublisher:
                 qos=1,
                 retain=True,
             )
+            # Subscribe to HA birth topic to detect restarts
+            if self.config.birth_topic and self._on_ha_online:
+                self.client.subscribe(self.config.birth_topic, qos=1)
+                self.logger.info(
+                    "Subscribed to HA birth topic: %s", self.config.birth_topic
+                )
         else:
             self._connected = False
             self.logger.error(
                 "Failed to connect to MQTT broker, return code: %s", rc
             )
+
+    def _on_message(
+        self,
+        client: mqtt.Client,
+        userdata: Any,
+        msg: mqtt.MQTTMessage,
+    ) -> None:
+        """Handle incoming messages (HA birth messages)."""
+        if msg.topic == self.config.birth_topic:
+            payload = msg.payload.decode("utf-8", errors="replace")
+            self.logger.info(
+                "Received message on birth topic %s: %s", msg.topic, payload
+            )
+            # HA publishes "online" when it starts
+            if payload.lower() == "online" and self._on_ha_online:
+                self.logger.info("Home Assistant came online, triggering discovery republish")
+                self._on_ha_online()
 
     def _on_disconnect(
         self,

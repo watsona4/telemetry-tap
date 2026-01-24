@@ -80,11 +80,22 @@ def main() -> None:
         return
 
     collector = MetricsCollector(config.collector, config.health)
-    publisher = None if args.dry_run else MqttPublisher(config.mqtt)
+
+    # Track the latest payload for discovery republishing
+    latest_payload: dict = {}
+
+    def on_ha_online() -> None:
+        """Callback when Home Assistant comes online - republish discovery."""
+        if publisher is not None and latest_payload:
+            logger.info("Republishing discovery after HA restart")
+            publisher.publish_discovery(latest_payload)
+
+    publisher = None if args.dry_run else MqttPublisher(config.mqtt, on_ha_online=on_ha_online)
     if publisher is not None:
         publisher.connect()
 
     initial_payload = collector.collect()
+    latest_payload = initial_payload
     schema_errors = validate_payload(initial_payload)
     if schema_errors:
         logger.warning("Schema validation failed with %s errors.", len(schema_errors))
@@ -114,6 +125,8 @@ def main() -> None:
     try:
         while True:
             payload = collector.collect()
+            latest_payload.clear()
+            latest_payload.update(payload)
             schema_errors = validate_payload(payload)
             if schema_errors:
                 logger.warning(

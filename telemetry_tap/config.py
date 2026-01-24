@@ -19,6 +19,7 @@ class MqttConfig:
     tls_enabled: bool
     ca_cert: str | None
     keepalive: int
+    birth_topic: str  # Topic to monitor for HA restarts
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,7 @@ def load_config(path: str | Path) -> AppConfig:
         tls_enabled=mqtt_section.getboolean("tls", False),
         ca_cert=_get_optional(mqtt_section.get("ca_cert")),
         keepalive=mqtt_section.getint("keepalive", 60),
+        birth_topic=mqtt_section.get("birth_topic", "homeassistant/status"),
     )
 
     publish = PublishConfig(

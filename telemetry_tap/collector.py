@@ -1214,10 +1214,11 @@ class MetricsCollector:
         """Collect CPU core temperatures on FreeBSD via sysctl.
 
         Returns a dict mapping core index to temperature in Celsius.
+        Uses dev.cpu.N.temperature if available, falls back to
+        hw.acpi.thermal.tz0 (ACPI thermal zone) as package temp.
         """
         temps: dict[int, float] = {}
 
-        # Try to get CPU temps from dev.cpu.N.temperature
         output = self._run_command(
             [self.config.sysctl_path, "-a"],
             stderr=subprocess.DEVNULL
@@ -1240,6 +1241,25 @@ class MetricsCollector:
                     temps[core_num] = temp_val
                 except (ValueError, IndexError):
                     continue
+
+        # Fallback: use ACPI thermal zone tz0 as CPU package temp if no per-core temps
+        if not temps:
+            for line in output.split("\n"):
+                # Look for hw.acpi.thermal.tz0.temperature: XXX.XC
+                if "hw.acpi.thermal.tz0.temperature:" in line:
+                    try:
+                        _, value = line.split(":", 1)
+                        temp_str = value.strip().rstrip("CK")
+                        temp_val = float(temp_str)
+                        if temp_val > 200:
+                            temp_val = temp_val - 273.15
+                        temps[0] = temp_val
+                        self.logger.debug(
+                            "Using ACPI thermal zone tz0 (%.1fC) as CPU temp", temp_val
+                        )
+                    except (ValueError, IndexError):
+                        continue
+                    break
 
         return temps
 

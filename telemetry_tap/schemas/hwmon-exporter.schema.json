@@ -283,6 +283,11 @@
                 }
               },
               "description": "Optional list of individual pending update entries."
+            },
+            "security_issues": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of packages with known security vulnerabilities (FreeBSD pkg audit)."
             }
           },
           "description": "Information about pending software updates on the host, if available."
@@ -837,9 +842,13 @@
                   "minimum": 0,
                   "description": "Per-core clock frequency in hertz, if available."
                 },
+                "temp_c": {
+                  "type": "number",
+                  "description": "Per-core temperature in degrees Celsius, if available."
+                },
                 "name": {
                   "type": "string",
-                  "description": "Core identifier (for example: “Core 0”)."
+                  "description": "Core identifier (for example: "Core 0")."
                 }
               },
               "required": [

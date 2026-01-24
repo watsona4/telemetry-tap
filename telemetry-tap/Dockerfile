@@ -9,11 +9,13 @@ RUN apk add --no-cache \
     smartmontools \
     lm-sensors \
     dmidecode \
-    docker-cli
+    docker-cli \
+    git
 
-# Install telemetry-tap from PyPI or GitHub
+# Install telemetry-tap from GitHub
 RUN pip3 install --no-cache-dir --break-system-packages \
-    git+https://github.com/watsona4/telemetry-tap.git
+    git+https://github.com/watsona4/telemetry-tap.git \
+    && apk del git
 
 # Copy run script
 COPY run.sh /

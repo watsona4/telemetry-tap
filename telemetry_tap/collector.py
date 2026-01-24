@@ -1331,7 +1331,7 @@ class MetricsCollector:
         # Get Supervisor token from environment (set by HassOS for addons with hassio_api: true)
         supervisor_token = os.environ.get("SUPERVISOR_TOKEN")
         if not supervisor_token:
-            self.logger.debug("SUPERVISOR_TOKEN not set, cannot query addon status")
+            self.logger.warning("SUPERVISOR_TOKEN not set, cannot query addon status")
             return [
                 {
                     "name": slug,
@@ -1342,6 +1342,7 @@ class MetricsCollector:
                 for slug in self.health.containers
             ]
 
+        self.logger.debug("Using Supervisor API to query %d addons", len(self.health.containers))
         addons: list[dict[str, Any]] = []
         for slug in self.health.containers:
             try:
@@ -1377,9 +1378,10 @@ class MetricsCollector:
                 if version:
                     addon_info["version"] = version
                 addons.append(addon_info)
+                self.logger.debug("Addon %s: state=%s", slug, state)
 
             except Exception as e:
-                self.logger.debug("Failed to get addon info for %s: %s", slug, e)
+                self.logger.warning("Failed to get addon info for %s: %s", slug, e)
                 addons.append({
                     "name": slug,
                     "ok": False,

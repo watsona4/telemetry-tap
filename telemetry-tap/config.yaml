@@ -1,6 +1,6 @@
 name: "Telemetry Tap"
 description: "Hardware monitoring agent that publishes system metrics via MQTT"
-version: "1.1.7"
+version: "1.2.0"
 slug: "telemetry-tap"
 init: false
 arch:
@@ -9,6 +9,7 @@ arch:
   - armv7
 startup: system
 boot: auto
+host_network: true
 options:
   mqtt_host: "core-mosquitto"
   mqtt_port: 1883
@@ -20,6 +21,8 @@ options:
   publish_interval: 15
   log_level: "INFO"
   containers: []
+  enable_time_server: false
+  pps_device: "/dev/pps0"
 schema:
   mqtt_host: str
   mqtt_port: port
@@ -32,8 +35,12 @@ schema:
   log_level: list(DEBUG|INFO|WARNING|ERROR)
   containers:
     - str
+  enable_time_server: bool
+  pps_device: str?
 services:
   - mqtt:need
 hassio_api: true
+devices:
+  - /dev/pps0
 map:
   - ssl:ro

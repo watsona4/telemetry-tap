@@ -21,6 +21,10 @@ for container in $(bashio::config 'containers'); do
     fi
 done
 
+# Read time server config
+ENABLE_TIME_SERVER=$(bashio::config 'enable_time_server')
+PPS_DEVICE=$(bashio::config 'pps_device')
+
 # Generate config file
 CONFIG_FILE="/tmp/telemetry-tap.cfg"
 
@@ -45,6 +49,11 @@ smartctl_path = smartctl
 lsblk_path = lsblk
 sensors_path = sensors
 dmidecode_path = dmidecode
+# Time server monitoring (chrony + gpsd)
+enable_time_server = ${ENABLE_TIME_SERVER}
+chronyc_path = chronyc
+gpspipe_path = gpspipe
+pps_device = ${PPS_DEVICE}
 
 [health]
 enable_hassio = true
@@ -54,6 +63,9 @@ EOF
 bashio::log.info "Starting Telemetry Tap..."
 bashio::log.info "MQTT broker: ${MQTT_HOST}:${MQTT_PORT}"
 bashio::log.info "Publishing to: ${MQTT_BASE_TOPIC}"
+if [ "${ENABLE_TIME_SERVER}" = "true" ]; then
+    bashio::log.info "Time server monitoring enabled (chrony + gpsd)"
+fi
 
 # Run telemetry-tap
 exec telemetry-tap --config "${CONFIG_FILE}" --log-level "${LOG_LEVEL}"

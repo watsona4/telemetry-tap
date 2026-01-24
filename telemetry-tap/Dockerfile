@@ -10,10 +10,12 @@ RUN apk add --no-cache \
     lm-sensors \
     dmidecode \
     docker-cli \
+    gpsd-clients \
+    chrony \
     git
 
 # Install telemetry-tap from GitHub (always pull latest from main)
-ARG CACHE_BUST=5
+ARG CACHE_BUST=6
 RUN pip3 install --no-cache-dir --break-system-packages --upgrade \
     git+https://github.com/watsona4/telemetry-tap.git@main \
     && apk del git

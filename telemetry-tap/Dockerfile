@@ -13,7 +13,7 @@ RUN apk add --no-cache \
     git
 
 # Install telemetry-tap from GitHub (always pull latest from main)
-ARG CACHE_BUST=1
+ARG CACHE_BUST=2
 RUN pip3 install --no-cache-dir --break-system-packages --upgrade \
     git+https://github.com/watsona4/telemetry-tap.git@main \
     && apk del git

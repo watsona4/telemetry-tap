@@ -19,6 +19,7 @@ options:
   mqtt_client_id: "ha-yellow"
   publish_interval: 15
   log_level: "INFO"
+  containers: []
 schema:
   mqtt_host: str
   mqtt_port: port
@@ -29,6 +30,8 @@ schema:
   mqtt_client_id: str
   publish_interval: int(1,3600)
   log_level: list(DEBUG|INFO|WARNING|ERROR)
+  containers:
+    - str
 services:
   - mqtt:need
 map:

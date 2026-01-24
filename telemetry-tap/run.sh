@@ -11,6 +11,16 @@ MQTT_CLIENT_ID=$(bashio::config 'mqtt_client_id')
 PUBLISH_INTERVAL=$(bashio::config 'publish_interval')
 LOG_LEVEL=$(bashio::config 'log_level')
 
+# Read containers list and convert to comma-separated string
+CONTAINERS=""
+for container in $(bashio::config 'containers'); do
+    if [ -n "${CONTAINERS}" ]; then
+        CONTAINERS="${CONTAINERS},${container}"
+    else
+        CONTAINERS="${container}"
+    fi
+done
+
 # Generate config file
 CONFIG_FILE="/tmp/telemetry-tap.cfg"
 
@@ -37,7 +47,8 @@ sensors_path = sensors
 dmidecode_path = dmidecode
 
 [health]
-containers = homeassistant
+enable_hassio = true
+containers = ${CONTAINERS}
 EOF
 
 bashio::log.info "Starting Telemetry Tap..."

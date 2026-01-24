@@ -619,12 +619,15 @@ class MetricsCollector:
                 elapsed = now - self.state.last_disk.timestamp
                 if elapsed > 0:
                     prev = self.state.last_disk.values[name]
-                    entry["read_rate_bps"] = int(
+                    read_rate = int(
                         (io_entry.read_bytes - prev.read_bytes) / elapsed
                     )
-                    entry["write_rate_bps"] = int(
+                    write_rate = int(
                         (io_entry.write_bytes - prev.write_bytes) / elapsed
                     )
+                    entry["read_rate_bps"] = read_rate
+                    entry["write_rate_bps"] = write_rate
+                    entry["total_rate_bps"] = read_rate + write_rate
                     # Calculate activity percentage from busy_time (ms)
                     if hasattr(io_entry, "busy_time") and hasattr(prev, "busy_time"):
                         busy_delta_ms = io_entry.busy_time - prev.busy_time
@@ -661,6 +664,9 @@ class MetricsCollector:
                 ]:
                     if key in lhm_match and lhm_match[key] is not None:
                         entry[key] = lhm_match[key]
+                # Compute total_rate_bps from LHM data if we have both rates
+                if "read_rate_bps" in entry and "write_rate_bps" in entry:
+                    entry["total_rate_bps"] = entry["read_rate_bps"] + entry["write_rate_bps"]
 
             # Get drive temp from Linux sensors if not already set
             if "temp_c" not in entry and platform.system().lower() == "linux":

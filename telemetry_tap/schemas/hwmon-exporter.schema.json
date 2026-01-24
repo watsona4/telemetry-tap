@@ -1398,6 +1398,12 @@
                 "type": "integer",
                 "minimum": 0,
                 "description": "Offline uncorrectable sector count (ATA/SATA SMART attribute 198), if reported."
+              },
+              "wear_leveling_pct": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Wear leveling count percentage (ATA/SATA SMART attribute 177), commonly reported by SSDs to indicate remaining lifespan."
               }
             }
           },

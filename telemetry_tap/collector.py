@@ -1324,27 +1324,34 @@ class MetricsCollector:
         return {"temps": temps}
 
     def _collect_hassio_addons(self) -> list[dict[str, Any]]:
-        """Collect addon status using Home Assistant OS CLI."""
+        """Collect addon status using Home Assistant Supervisor API."""
         if not self.health.containers:
             return []
 
-        addons: list[dict[str, Any]] = []
-        for slug in self.health.containers:
-            output = self._run_command(
-                [self.health.ha_path, "addons", "info", slug, "--raw-json"]
-            )
-            if output is None:
-                self.logger.debug("Failed to get info for addon %s", slug)
-                addons.append({
+        # Get Supervisor token from environment (set by HassOS for addons with hassio_api: true)
+        supervisor_token = os.environ.get("SUPERVISOR_TOKEN")
+        if not supervisor_token:
+            self.logger.debug("SUPERVISOR_TOKEN not set, cannot query addon status")
+            return [
+                {
                     "name": slug,
                     "ok": False,
                     "status": "unknown",
-                    "detail": "ha command failed",
-                })
-                continue
+                    "detail": "no supervisor token",
+                }
+                for slug in self.health.containers
+            ]
 
+        addons: list[dict[str, Any]] = []
+        for slug in self.health.containers:
             try:
-                info = json.loads(output)
+                from urllib.request import Request
+                url = f"http://supervisor/addons/{slug}/info"
+                req = Request(url)
+                req.add_header("Authorization", f"Bearer {supervisor_token}")
+                with urlopen(req, timeout=5) as response:
+                    info = json.loads(response.read().decode("utf-8"))
+
                 data = info.get("data", info)
                 state = data.get("state", "unknown")
                 name = data.get("name", slug)
@@ -1371,13 +1378,13 @@ class MetricsCollector:
                     addon_info["version"] = version
                 addons.append(addon_info)
 
-            except (json.JSONDecodeError, KeyError) as e:
-                self.logger.debug("Failed to parse addon info for %s: %s", slug, e)
+            except Exception as e:
+                self.logger.debug("Failed to get addon info for %s: %s", slug, e)
                 addons.append({
                     "name": slug,
                     "ok": False,
                     "status": "unknown",
-                    "detail": f"parse error: {e}",
+                    "detail": str(e),
                 })
 
         return addons

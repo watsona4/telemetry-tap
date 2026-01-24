@@ -63,6 +63,9 @@ class CollectorConfig:
 class HealthConfig:
     services: list[str]
     containers: list[str]
+    # HassOS (Home Assistant OS) support - use `ha` CLI instead of Docker
+    enable_hassio: bool
+    ha_path: str
 
 
 @dataclass(frozen=True)
@@ -152,6 +155,8 @@ def load_config(path: str | Path) -> AppConfig:
     health = HealthConfig(
         services=_get_list(parser.get("health", "services", fallback=None)),
         containers=_get_list(parser.get("health", "containers", fallback=None)),
+        enable_hassio=parser.getboolean("health", "enable_hassio", fallback=False),
+        ha_path=parser.get("health", "ha_path", fallback="ha"),
     )
 
     return AppConfig(mqtt=mqtt, publish=publish, collector=collector, health=health)

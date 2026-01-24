@@ -1323,9 +1323,73 @@ class MetricsCollector:
 
         return {"temps": temps}
 
+    def _collect_hassio_addons(self) -> list[dict[str, Any]]:
+        """Collect addon status using Home Assistant OS CLI."""
+        if not self.health.containers:
+            return []
+
+        addons: list[dict[str, Any]] = []
+        for slug in self.health.containers:
+            output = self._run_command(
+                [self.health.ha_path, "addons", "info", slug, "--raw-json"]
+            )
+            if output is None:
+                self.logger.debug("Failed to get info for addon %s", slug)
+                addons.append({
+                    "name": slug,
+                    "ok": False,
+                    "status": "unknown",
+                    "detail": "ha command failed",
+                })
+                continue
+
+            try:
+                info = json.loads(output)
+                data = info.get("data", info)
+                state = data.get("state", "unknown")
+                name = data.get("name", slug)
+                version = data.get("version")
+
+                # HassOS states: started, stopped, unknown
+                if state == "started":
+                    status = "running"
+                    ok = True
+                elif state == "stopped":
+                    status = "stopped"
+                    ok = False
+                else:
+                    status = state
+                    ok = False
+
+                addon_info: dict[str, Any] = {
+                    "name": name,
+                    "ok": ok,
+                    "status": status,
+                    "detail": state,
+                }
+                if version:
+                    addon_info["version"] = version
+                addons.append(addon_info)
+
+            except (json.JSONDecodeError, KeyError) as e:
+                self.logger.debug("Failed to parse addon info for %s: %s", slug, e)
+                addons.append({
+                    "name": slug,
+                    "ok": False,
+                    "status": "unknown",
+                    "detail": f"parse error: {e}",
+                })
+
+        return addons
+
     def _collect_containers(self) -> list[dict[str, Any]]:
         if not self.health.containers:
             return []
+
+        # Use HassOS CLI if enabled
+        if self.health.enable_hassio:
+            return self._collect_hassio_addons()
+
         output = self._run_command(
             [
                 "docker",

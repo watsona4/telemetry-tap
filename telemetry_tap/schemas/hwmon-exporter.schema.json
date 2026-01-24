@@ -366,6 +366,7 @@
                   "dead",
                   "starting",
                   "healthy",
+                  "stopped",
                   "unknown"
                 ],
                 "type": "string",
@@ -378,6 +379,10 @@
               "detail": {
                 "type": "string",
                 "description": "Optional detail explaining failures or unexpected status."
+              },
+              "version": {
+                "type": "string",
+                "description": "Container or addon version string, if available."
               }
             }
           },

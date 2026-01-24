@@ -184,9 +184,10 @@ class MqttPublisher:
     def publish_discovery(self, host_payload: dict[str, Any]) -> None:
         host = host_payload.get("host", {})
         device_id = self.config.client_id
-        name = host.get("name", device_id)
+        device_name = host.get("name", device_id)
         discovery_payload = {
-            "name": f"{name} Hardware Telemetry",
+            # Use simple name since device name already identifies the host
+            "name": "Hardware Telemetry",
             "unique_id": f"{device_id}_telemetry",
             "state_topic": self.config.base_topic,
             "value_template": "{{ value_json.host.uptime_s }}",
@@ -196,7 +197,7 @@ class MqttPublisher:
             "payload_not_available": "offline",
             "device": {
                 "identifiers": [device_id],
-                "name": name,
+                "name": device_name,
                 "model": host.get("machine"),
                 "manufacturer": host.get("system"),
             },

@@ -1,6 +1,6 @@
 name: "Telemetry Tap"
 description: "Hardware monitoring agent that publishes system metrics via MQTT"
-version: "1.1.4"
+version: "1.1.5"
 slug: "telemetry-tap"
 init: false
 arch:

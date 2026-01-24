@@ -63,6 +63,7 @@ class CollectorConfig:
 class HealthConfig:
     services: list[str]
     containers: list[str]
+    exclude_disk_checks: list[str]  # Mountpoints to exclude from disk space warnings
     # HassOS (Home Assistant OS) support - use `ha` CLI instead of Docker
     enable_hassio: bool
     ha_path: str
@@ -155,6 +156,7 @@ def load_config(path: str | Path) -> AppConfig:
     health = HealthConfig(
         services=_get_list(parser.get("health", "services", fallback=None)),
         containers=_get_list(parser.get("health", "containers", fallback=None)),
+        exclude_disk_checks=_get_list(parser.get("health", "exclude_disk_checks", fallback=None)),
         enable_hassio=parser.getboolean("health", "enable_hassio", fallback=False),
         ha_path=parser.get("health", "ha_path", fallback="ha"),
     )

@@ -776,6 +776,9 @@ class MetricsCollector:
             # Skip read-only squashfs mounts (snap packages) - they're always 100% used
             if part.fstype == "squashfs":
                 continue
+            # Skip mountpoints in the exclusion list
+            if part.mountpoint in self.health.exclude_disk_checks:
+                continue
             try:
                 usage = psutil.disk_usage(part.mountpoint)
             except OSError:

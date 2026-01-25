@@ -1553,6 +1553,15 @@
                   "type": "string",
                   "description": "Partition table UUID of the parent disk, if available."
                 },
+                "volume_guid": {
+                  "type": "string",
+                  "description": "Volume GUID (Windows), if available."
+                },
+                "start_offset_b": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Starting offset of the partition in bytes (Windows), if available."
+                },
                 "source": {
                   "type": "string",
                   "description": "Collector/source for partition metadata (for example: 'lsblk', 'wmic', 'lhm', 'diskpart')."

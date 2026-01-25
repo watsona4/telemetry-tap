@@ -1649,7 +1649,8 @@ class MetricsCollector:
         result = self._run_command(
             ["powershell", "-Command",
              "Get-Partition | Select-Object DiskNumber, PartitionNumber, DriveLetter, "
-             "Size, Type, GptType | ConvertTo-Json"],
+             "Size, Type, GptType, UniqueId, Guid, AccessPaths, Offset, "
+             "IsActive, IsBoot, IsHidden, IsSystem, MbrType | ConvertTo-Json"],
             stderr=subprocess.DEVNULL,
         )
         if result:
@@ -1666,19 +1667,66 @@ class MetricsCollector:
                     }
                     if part.get("PartitionNumber"):
                         part_entry["number"] = part["PartitionNumber"]
+                    # Use drive letter as label, or first access path
                     if part.get("DriveLetter"):
                         part_entry["label"] = f"{part['DriveLetter']}:"
+                    elif part.get("AccessPaths"):
+                        paths = part["AccessPaths"]
+                        if isinstance(paths, list) and paths:
+                            # Filter out volume GUIDs, prefer drive letters
+                            for p in paths:
+                                if p and len(p) <= 3 and ":" in p:
+                                    part_entry["label"] = p
+                                    break
                     if part.get("Size"):
                         part_entry["size_b"] = part["Size"]
                     if part.get("GptType"):
                         part_entry["type_guid"] = part["GptType"]
+                        # Map common GPT GUIDs to human-readable names
+                        gpt_names = {
+                            "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}": "EFI System",
+                            "{e3c9e316-0b5c-4db8-817d-f92df00215ae}": "Microsoft Reserved",
+                            "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}": "Basic Data",
+                            "{de94bba4-06d1-4d40-a16a-bfd50179d6ac}": "Windows Recovery",
+                            "{5808c8aa-7e8f-42e0-85d2-e1e90434cfb3}": "LDM Metadata",
+                            "{af9b60a0-1431-4f62-bc68-3311714a69ad}": "LDM Data",
+                        }
+                        gpt_lower = part["GptType"].lower()
+                        if gpt_lower in gpt_names:
+                            part_entry["type_name"] = gpt_names[gpt_lower]
+                    if part.get("MbrType"):
+                        part_entry["type_guid"] = f"MBR:{part['MbrType']:02x}"
+                    # UniqueId is the partition GUID
+                    if part.get("UniqueId"):
+                        part_entry["uuid"] = part["UniqueId"]
+                    # Guid is the volume GUID
+                    if part.get("Guid"):
+                        part_entry["volume_guid"] = part["Guid"]
+                    # Offset is start position in bytes
+                    if part.get("Offset"):
+                        part_entry["start_offset_b"] = part["Offset"]
+                    # Determine content type from flags and Type string
                     part_type = (part.get("Type") or "").lower()
-                    if "system" in part_type:
+                    if part.get("IsSystem"):
                         part_entry["content"] = "filesystem"
+                        if not part_entry.get("type_name"):
+                            part_entry["type_name"] = "System"
+                    elif part.get("IsBoot"):
+                        part_entry["content"] = "filesystem"
+                        if not part_entry.get("type_name"):
+                            part_entry["type_name"] = "Boot"
+                    elif part.get("IsHidden"):
+                        part_entry["content"] = "unknown"
+                        if not part_entry.get("type_name"):
+                            part_entry["type_name"] = "Hidden"
                     elif "recovery" in part_type:
                         part_entry["content"] = "filesystem"
+                        if not part_entry.get("type_name"):
+                            part_entry["type_name"] = "Recovery"
                     elif "reserved" in part_type:
                         part_entry["content"] = "unknown"
+                        if not part_entry.get("type_name"):
+                            part_entry["type_name"] = "Reserved"
                     else:
                         part_entry["content"] = "filesystem"
                     part_entry["source"] = "powershell"

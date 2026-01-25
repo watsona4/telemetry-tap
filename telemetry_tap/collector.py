@@ -1937,6 +1937,7 @@ class MetricsCollector:
                 "name": child.get("path") or f"/dev/{name}",
                 "number": child.get("partno"),
                 "type_guid": child.get("parttype"),
+                "type_name": child.get("parttypename"),
                 "label": child.get("partlabel"),
                 "uuid": child.get("partuuid"),
                 "fstype": fstype,
@@ -1945,6 +1946,11 @@ class MetricsCollector:
                 "end_lba": child.get("end"),
                 "content": content,
                 "holders": child.get("holders"),
+                "kname": child.get("kname"),
+                "id_link": child.get("id-link"),
+                "wwn": child.get("wwn"),
+                "pttype": child.get("pttype"),
+                "ptuuid": child.get("ptuuid"),
                 "source": "lsblk",
             }
             if fstype in {"crypto_LUKS"}:

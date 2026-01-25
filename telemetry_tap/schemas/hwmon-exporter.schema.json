@@ -1436,6 +1436,10 @@
                   "type": "string",
                   "description": "GPT partition type GUID (or other partition type identifier), if available."
                 },
+                "type_name": {
+                  "type": "string",
+                  "description": "Human-readable partition type name (for example: 'Linux filesystem', 'EFI System'), if available."
+                },
                 "label": {
                   "type": "string",
                   "description": "Partition label, if available."
@@ -1528,6 +1532,26 @@
                   "items": {
                     "type": "string"
                   }
+                },
+                "kname": {
+                  "type": "string",
+                  "description": "Kernel device name (for example: 'sda1', 'nvme0n1p2'), if available."
+                },
+                "id_link": {
+                  "type": "string",
+                  "description": "Persistent device ID symlink path (for example: 'scsi-350014ee26b74ad33-part1'), if available."
+                },
+                "wwn": {
+                  "type": "string",
+                  "description": "World Wide Name of the parent device, if available."
+                },
+                "pttype": {
+                  "type": "string",
+                  "description": "Partition table type (for example: 'gpt', 'dos'), if available."
+                },
+                "ptuuid": {
+                  "type": "string",
+                  "description": "Partition table UUID of the parent disk, if available."
                 },
                 "source": {
                   "type": "string",

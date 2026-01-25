@@ -411,6 +411,7 @@ class MetricsCollector:
                 "used_b": int(swap.used),
                 "available_b": int(swap.free),
                 "load_pct": float(swap.percent),
+                "total_b": int(swap.used) + int(swap.free),
             }
         return memory
 

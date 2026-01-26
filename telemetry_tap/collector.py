@@ -1882,48 +1882,56 @@ class MetricsCollector:
     def _windows_bitlocker_status(self, mountpoints: list[str]) -> dict[str, dict[str, Any]]:
         """Get BitLocker encryption status for Windows volumes.
 
-        Uses Shell COM object to check BitLocker status without requiring admin rights.
-        BitLocker protection values:
-        - 0/null: Not encrypted or not BitLocker capable
-        - 1: BitLocker On (unlocked)
-        - 2: BitLocker Off
-        - 3: BitLocker suspended
-        - 6: BitLocker On (locked)
+        Uses WMI Win32_EncryptableVolume class which is more reliable than Shell COM.
+        ProtectionStatus values:
+        - 0: Protection Off
+        - 1: Protection On
+        - 2: Protection Unknown
         """
         if not mountpoints:
             return {}
-        # Build PowerShell command to check all mountpoints
-        drives_array = ", ".join(f'"{m}"' for m in mountpoints)
+
+        # Use WMI to query BitLocker status - more reliable than Shell COM
         ps_script = (
-            f"$shell = New-Object -ComObject Shell.Application; "
-            f"@({drives_array}) | ForEach-Object {{ "
-            f"$ns = $shell.NameSpace($_); "
-            f"if ($ns) {{ $status = $ns.Self.ExtendedProperty('System.Volume.BitLockerProtection'); "
-            f"[PSCustomObject]@{{Drive=$_; BitLocker=$status}} }} }} | ConvertTo-Json"
+            "Get-CimInstance -Namespace 'Root\\cimv2\\Security\\MicrosoftVolumeEncryption' "
+            "-ClassName 'Win32_EncryptableVolume' -ErrorAction SilentlyContinue | "
+            "Select-Object DriveLetter, ProtectionStatus, EncryptionMethod, LockStatus | ConvertTo-Json"
         )
         result = self._run_command(
             ["powershell", "-Command", ps_script],
             stderr=subprocess.DEVNULL,
         )
         if not result:
+            self.logger.debug("BitLocker WMI check returned no result")
             return {}
         try:
             data = json.loads(result)
+            self.logger.debug("BitLocker WMI raw data: %s", data)
             if isinstance(data, dict):
                 data = [data]
             status: dict[str, dict[str, Any]] = {}
             for entry in data:
-                mount = entry.get("Drive")
-                bitlocker_val = entry.get("BitLocker")
-                if not mount:
+                drive_letter = entry.get("DriveLetter")
+                protection = entry.get("ProtectionStatus")
+                encryption_method = entry.get("EncryptionMethod")
+                lock_status = entry.get("LockStatus")
+                self.logger.debug(
+                    "BitLocker WMI: %s protection=%s encryption=%s lock=%s",
+                    drive_letter, protection, encryption_method, lock_status
+                )
+                if not drive_letter:
                     continue
-                # Values 1, 3, 6 indicate BitLocker is present
-                # 1 = On (unlocked), 3 = Suspended, 6 = On (locked)
-                if bitlocker_val in (1, 3, 6):
-                    status[mount] = {"encrypted": True, "scheme": "bitlocker"}
+                # Normalize to mountpoint format (C:\)
+                mountpoint = f"{drive_letter}:\\"
+                if mountpoint not in mountpoints:
+                    continue
+                # ProtectionStatus 1 = On, EncryptionMethod > 0 means encrypted
+                # Also check if encryption method is set (volume has been encrypted)
+                if protection == 1 or (encryption_method is not None and encryption_method > 0):
+                    status[mountpoint] = {"encrypted": True, "scheme": "bitlocker"}
             return status
         except json.JSONDecodeError:
-            self.logger.debug("Failed to parse BitLocker status.")
+            self.logger.debug("Failed to parse BitLocker WMI status: %s", result)
             return {}
 
     def _windows_volume_metadata(self) -> dict[str, dict[str, Any]]:

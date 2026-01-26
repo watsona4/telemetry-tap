@@ -544,6 +544,7 @@ class MetricsCollector:
             # Add encryption info if available
             if part.mountpoint in bitlocker_status:
                 entry["encryption"] = bitlocker_status[part.mountpoint]
+                self.logger.debug("Added encryption info to %s", part.mountpoint)
 
             # Add volume metadata (label, uuid, fstype) on Windows
             if part.mountpoint in volume_metadata:
@@ -1922,7 +1923,10 @@ class MetricsCollector:
                 if not drive_letter:
                     continue
                 # Normalize to mountpoint format (C:\)
+                # DriveLetter from WMI can be "C:" or "C", normalize both
+                drive_letter = drive_letter.rstrip(":")
                 mountpoint = f"{drive_letter}:\\"
+                self.logger.debug("BitLocker mountpoint check: %s in %s", mountpoint, mountpoints)
                 if mountpoint not in mountpoints:
                     continue
                 # ProtectionStatus 1 = On, EncryptionMethod > 0 means encrypted

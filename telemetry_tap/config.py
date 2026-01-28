@@ -25,6 +25,7 @@ class MqttConfig:
 @dataclass(frozen=True)
 class PublishConfig:
     interval_s: int
+    pause_port: int | None  # Skip collection when this port has active connections (e.g., iperf3)
 
 
 @dataclass(frozen=True)
@@ -115,8 +116,11 @@ def load_config(path: str | Path) -> AppConfig:
         birth_topic=mqtt_section.get("birth_topic", "homeassistant/status"),
     )
 
+    pause_port_str = publish_section.get("pause_port", "")
+    pause_port = int(pause_port_str) if pause_port_str.strip() else None
     publish = PublishConfig(
         interval_s=publish_section.getint("interval_s", 15),
+        pause_port=pause_port,
     )
 
     # Use parser.get/getboolean with fallback to handle missing [collector] section

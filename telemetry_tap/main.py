@@ -5,11 +5,29 @@ import json
 import logging
 import time
 
+import psutil
+
 from telemetry_tap.collector import MetricsCollector
 from telemetry_tap.config import load_config
 from telemetry_tap.logging_utils import configure_logging, resolve_log_level
 from telemetry_tap.mqtt_client import MqttPublisher
 from telemetry_tap.schema import validate_payload
+
+
+def has_active_connections(port: int) -> bool:
+    """Check if there are established connections on the given port.
+
+    Used to detect active iperf3 or similar speed tests.
+    """
+    try:
+        connections = psutil.net_connections(kind="inet")
+        for conn in connections:
+            # Check for established connections where local port matches
+            if conn.status == "ESTABLISHED" and conn.laddr.port == port:
+                return True
+    except (psutil.AccessDenied, psutil.NoSuchProcess):
+        pass
+    return False
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -122,8 +140,17 @@ def main() -> None:
     interval = max(1, config.publish.interval_s)
     logging.info("Telemetry Tap started. Publishing every %s seconds.", interval)
 
+    pause_port = config.publish.pause_port
     try:
         while True:
+            # Skip collection if pause_port has active connections (e.g., iperf3 speed test)
+            if pause_port and has_active_connections(pause_port):
+                logger.debug(
+                    "Skipping collection: active connections on port %d", pause_port
+                )
+                time.sleep(interval)
+                continue
+
             payload = collector.collect()
             latest_payload.clear()
             latest_payload.update(payload)

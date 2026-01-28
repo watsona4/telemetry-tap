@@ -83,6 +83,9 @@ def health_config():
     return HealthConfig(
         services=[],
         containers=[],
+        exclude_disk_checks=[],
+        enable_hassio=False,
+        ha_path="ha",
     )
 
 
@@ -114,7 +117,7 @@ class TestFreeBSDCollector:
     @patch("subprocess.run")
     def test_collect_services_freebsd(self, mock_run, mock_freebsd, health_config, collector_config):
         """Test FreeBSD service status collection."""
-        health = HealthConfig(services=["sshd", "nginx"], containers=[])
+        health = HealthConfig(services=["sshd", "nginx"], containers=[], exclude_disk_checks=[], enable_hassio=False, ha_path="ha")
         collector = MetricsCollector(collector_config, health)
 
         # Mock service status responses
@@ -142,7 +145,7 @@ class TestFreeBSDCollector:
     @patch("subprocess.run")
     def test_collect_services_opnsense_pluginctl(self, mock_run, mock_freebsd, health_config, collector_config_opnsense):
         """Test OPNsense service status collection via pluginctl."""
-        health = HealthConfig(services=["unbound", "tailscale", "webgui"], containers=[])
+        health = HealthConfig(services=["unbound", "tailscale", "webgui"], containers=[], exclude_disk_checks=[], enable_hassio=False, ha_path="ha")
         collector = MetricsCollector(collector_config_opnsense, health)
 
         # Mock pluginctl status responses - return 0 for running services
@@ -167,7 +170,7 @@ class TestFreeBSDCollector:
     @patch("subprocess.run")
     def test_collect_services_opnsense_mixed(self, mock_run, mock_freebsd, health_config, collector_config_opnsense):
         """Test OPNsense service status with mix of running and stopped services."""
-        health = HealthConfig(services=["unbound", "ids"], containers=[])
+        health = HealthConfig(services=["unbound", "ids"], containers=[], exclude_disk_checks=[], enable_hassio=False, ha_path="ha")
         collector = MetricsCollector(collector_config_opnsense, health)
 
         # Mock: unbound running via pluginctl, ids not running

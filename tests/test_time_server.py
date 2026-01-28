@@ -42,7 +42,7 @@ def time_server_config():
 @pytest.fixture
 def health_config():
     """Create a health config."""
-    return HealthConfig(services=[], containers=[])
+    return HealthConfig(services=[], containers=[], exclude_disk_checks=[], enable_hassio=False, ha_path="ha")
 
 
 @pytest.fixture

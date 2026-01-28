@@ -53,6 +53,9 @@ def health_config():
     return HealthConfig(
         services=[],
         containers=[],
+        exclude_disk_checks=[],
+        enable_hassio=False,
+        ha_path="ha",
     )
 
 
@@ -223,7 +226,7 @@ class TestWindowsHealthChecks:
     @patch("subprocess.run")
     def test_service_checks_work_on_windows(self, mock_run, mock_windows, health_config, collector_config):
         """Test that Windows service checks work properly."""
-        health = HealthConfig(services=["wuauserv"], containers=[])
+        health = HealthConfig(services=["wuauserv"], containers=[], exclude_disk_checks=[], enable_hassio=False, ha_path="ha")
         collector = MetricsCollector(collector_config, health)
 
         # Mock PowerShell response for Windows service query
@@ -245,7 +248,7 @@ class TestWindowsHealthChecks:
     @patch("subprocess.run")
     def test_docker_container_checks_work_on_windows(self, mock_run, mock_windows, health_config, collector_config):
         """Test that Docker container checks work on Windows."""
-        health = HealthConfig(services=[], containers=["test-container"])
+        health = HealthConfig(services=[], containers=["test-container"], exclude_disk_checks=[], enable_hassio=False, ha_path="ha")
         collector = MetricsCollector(collector_config, health)
 
         mock_run.return_value = Mock(

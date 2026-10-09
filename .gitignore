@@ -210,3 +210,8 @@ __marimo__/
 config/local.cfg
 coverage.txt
 telemetry.json
+
+# Local config, built binary and scratch output
+config.cfg
+telemetry-tap.exe
+temp_*.json
